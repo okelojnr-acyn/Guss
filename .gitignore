@@ -1,0 +1,15 @@
+/target
+**/target
+Cargo.lock.bak
+.env
+*.db
+*.sqlite
+*.sqlite3
+/data/
+*.wav
+*.ogg
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

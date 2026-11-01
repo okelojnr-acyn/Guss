@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/guss-app",
+    "crates/guss-core",
+    "crates/guss-store",
+    "crates/guss-llm",
+    "crates/guss-nlu",
+    "crates/guss-voice",
+    "crates/guss-insights",
+    "crates/guss-channels",
+    "crates/guss-scheduler",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/okelojnr-acyn/Guss"
+
+[profile.release]
+opt-level = 3
+lto = true
