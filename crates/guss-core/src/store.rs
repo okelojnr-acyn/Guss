@@ -44,6 +44,10 @@ pub struct StockLevel {
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn save_event(&self, event: &BusinessEvent) -> Result<(), StoreError>;
+    /// Removes a previously saved event - used by the confirmation/undo
+    /// flow so a wrong LLM extraction can be reversed within a grace
+    /// window instead of permanently corrupting the ledger.
+    async fn delete_event(&self, id: Uuid) -> Result<(), StoreError>;
     async fn list_events(
         &self,
         business_id: Uuid,

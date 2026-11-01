@@ -193,6 +193,15 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn delete_event(&self, id: Uuid) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM events WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     async fn list_events(
         &self,
         business_id: Uuid,
@@ -511,6 +520,20 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert!(found[0].content.contains("rice"));
+    }
+
+    #[tokio::test]
+    async fn delete_event_removes_it_from_current_stock() {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        let business_id = Uuid::new_v4();
+        let event = restock(business_id, "rice", 10.0, None);
+        let event_id = event.id();
+
+        store.save_event(&event).await.unwrap();
+        assert_eq!(store.current_stock(business_id, "rice").await.unwrap(), 10.0);
+
+        store.delete_event(event_id).await.unwrap();
+        assert_eq!(store.current_stock(business_id, "rice").await.unwrap(), 0.0);
     }
 
     #[tokio::test]

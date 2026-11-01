@@ -746,18 +746,36 @@ version = "0.1.0"
 dependencies = [
  "dotenvy",
  "figment",
+ "guss-channels",
  "guss-core",
+ "guss-llm",
+ "guss-nlu",
  "guss-store",
  "serde",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
 name = "guss-channels"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "guss-core",
+ "guss-insights",
+ "guss-llm",
+ "guss-nlu",
+ "guss-store",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "guss-core"

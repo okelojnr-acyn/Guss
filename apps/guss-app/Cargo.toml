@@ -6,13 +6,17 @@ edition = "2024"
 [dependencies]
 dotenvy = "0.15.7"
 figment = { version = "0.10.19", features = ["env", "toml"] }
+guss-channels = { version = "0.1.0", path = "../../crates/guss-channels" }
 guss-core = { version = "0.1.0", path = "../../crates/guss-core" }
+guss-llm = { version = "0.1.0", path = "../../crates/guss-llm" }
+guss-nlu = { version = "0.1.0", path = "../../crates/guss-nlu" }
 guss-store = { version = "0.1.0", path = "../../crates/guss-store" }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
 figment = { version = "0.10.19", features = ["env", "toml", "test"] }

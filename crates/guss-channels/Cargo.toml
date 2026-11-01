@@ -4,3 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+guss-core = { version = "0.1.0", path = "../guss-core" }
+guss-insights = { version = "0.1.0", path = "../guss-insights" }
+guss-llm = { version = "0.1.0", path = "../guss-llm" }
+guss-nlu = { version = "0.1.0", path = "../guss-nlu" }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tracing = "0.1.44"
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+async-trait = "0.1.92"
+guss-store = { path = "../guss-store" }
+serde_json = "1.0.154"
