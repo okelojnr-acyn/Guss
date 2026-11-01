@@ -11,6 +11,7 @@ edition = "2024"
 local-whisper = ["guss-voice/local-whisper"]
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
 dotenvy = "0.15.7"
 figment = { version = "0.10.19", features = ["env", "toml"] }
 guss-channels = { version = "0.1.0", path = "../../crates/guss-channels" }

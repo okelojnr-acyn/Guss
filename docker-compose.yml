@@ -1,0 +1,51 @@
+services:
+  guss:
+    build:
+      context: .
+      args:
+        FEATURES: ${GUSS_FEATURES:-}
+    env_file:
+      - .env
+    volumes:
+      - guss-data:/app/data
+    ports:
+      - "8080:8080" # only needed for GUSS_CHANNEL__KIND=whatsapp's webhook
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_started
+        required: false
+
+  # Optional: free, local LLM. Only starts if you run
+  # `docker compose --profile ollama up`. Point GUSS_LLM__BASE_URL at
+  # http://ollama:11434/v1 in your .env to use it from inside the
+  # guss container. Skip this service entirely if you're using Groq/OpenAI.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+  # NOT YET WIRED UP: guss-store has a "postgres" cargo feature flag and
+  # schema groundwork (every table/column is dialect-agnostic), but
+  # guss-app only calls SqliteStore::connect today - a PostgresStore
+  # implementing the same Store trait is a documented follow-up, not
+  # something this compose file can turn on by itself yet. This service
+  # is left here as the intended shape for that work, not a working
+  # Supabase-style setup - see docs/ARCHITECTURE.md.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: guss
+      POSTGRES_PASSWORD: guss
+      POSTGRES_DB: guss
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  guss-data:
+  ollama-data:
+  postgres-data:

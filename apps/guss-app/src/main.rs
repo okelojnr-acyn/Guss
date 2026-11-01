@@ -1,7 +1,9 @@
 mod config;
+mod init;
 
 use std::sync::Arc;
 
+use clap::{Parser, Subcommand};
 use config::AppConfig;
 use guss_channels::{cli, telegram, Orchestrator, VoiceSupport};
 use guss_core::domain::BusinessProfile;
@@ -11,6 +13,19 @@ use guss_nlu::Nlu;
 use guss_voice::tts::{ElevenLabsTts, PiperTts};
 use guss_voice::Tts;
 use uuid::Uuid;
+
+#[derive(Parser)]
+#[command(name = "guss", about = "A self-hosted voice/chat business co-pilot")]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Interactive setup wizard - prints a .env file to stdout
+    Init,
+}
 
 #[cfg(feature = "local-whisper")]
 use guss_voice::{stt::WhisperStt, Stt};
@@ -59,6 +74,23 @@ fn build_voice_support(config: &config::AppConfig, language: &str) -> VoiceSuppo
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+    if matches!(args.command, Some(Command::Init)) {
+        // Prompts go to stderr and the finished .env content goes to
+        // stdout, so `guss init > .env` redirects only the real output,
+        // not the interactive questions.
+        let stdin = std::io::stdin().lock();
+        let stderr = std::io::stderr().lock();
+        match init::run_wizard(stdin, stderr) {
+            Ok(env) => print!("{env}"),
+            Err(e) => {
+                eprintln!("guss init failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     tracing_subscriber::fmt::init();
 
     let config = match AppConfig::load() {
@@ -69,6 +101,16 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    if !config.store.url.starts_with("sqlite:") {
+        eprintln!(
+            "GUSS_STORE__URL=\"{}\" isn't a sqlite:// URL. Postgres has schema groundwork in \
+             guss-store but no PostgresStore is wired up in guss-app yet - see docs/ARCHITECTURE.md. \
+             Use a sqlite:// URL (e.g. sqlite://guss.db) for now.",
+            config.store.url
+        );
+        std::process::exit(1);
+    }
 
     let store = match guss_store::SqliteStore::connect(&config.store.url).await {
         Ok(store) => Arc::new(store),

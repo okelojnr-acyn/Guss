@@ -1,0 +1,5 @@
+target
+.git
+*.db
+*.sqlite
+.env
