@@ -17,6 +17,7 @@ guss-channels = { version = "0.1.0", path = "../../crates/guss-channels" }
 guss-core = { version = "0.1.0", path = "../../crates/guss-core" }
 guss-llm = { version = "0.1.0", path = "../../crates/guss-llm" }
 guss-nlu = { version = "0.1.0", path = "../../crates/guss-nlu" }
+guss-scheduler = { version = "0.1.0", path = "../../crates/guss-scheduler" }
 guss-store = { version = "0.1.0", path = "../../crates/guss-store" }
 guss-voice = { version = "0.1.0", path = "../../crates/guss-voice", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -135,6 +135,20 @@ pub struct ChannelConfig {
     pub whatsapp_app_secret: Option<String>,
     #[serde(default = "default_whatsapp_listen_addr")]
     pub whatsapp_listen_addr: String,
+    /// Where scheduled (EOD/weekly/monthly) reports get pushed - the
+    /// business owner's own chat/number. Without this, Guss still answers
+    /// on-demand "report" requests but can't proactively push one.
+    pub telegram_owner_chat_id: Option<i64>,
+    pub whatsapp_owner_phone_number: Option<String>,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SchedulerConfig {
+    pub daily_cron: Option<String>,
+    pub weekly_cron: Option<String>,
+    pub monthly_cron: Option<String>,
 }
 
 fn default_channel_kind() -> String {
@@ -155,6 +169,9 @@ impl Default for ChannelConfig {
             whatsapp_phone_number_id: None,
             whatsapp_app_secret: None,
             whatsapp_listen_addr: default_whatsapp_listen_addr(),
+            telegram_owner_chat_id: None,
+            whatsapp_owner_phone_number: None,
+            scheduler: SchedulerConfig::default(),
         }
     }
 }

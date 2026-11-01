@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use guss_core::domain::SourceChannel;
 use guss_core::store::Store;
 use guss_llm::LlmProvider;
+use guss_scheduler::ReportSink;
 use guss_voice::AudioFormat;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, UpdateKind};
@@ -12,6 +14,27 @@ use tokio::task::JoinSet;
 
 use crate::orchestrator::Orchestrator;
 use crate::voice_support::VoiceSupport;
+
+/// Delivers scheduled (EOD/weekly/monthly) reports to a fixed Telegram
+/// chat - the business owner's own chat with the bot, configured once
+/// via GUSS_CHANNEL__TELEGRAM_OWNER_CHAT_ID.
+pub struct TelegramReportSink {
+    bot: Bot,
+    chat_id: ChatId,
+}
+
+impl TelegramReportSink {
+    pub fn new(bot_token: &str, chat_id: i64) -> Self {
+        Self { bot: Bot::new(bot_token), chat_id: ChatId(chat_id) }
+    }
+}
+
+#[async_trait]
+impl ReportSink for TelegramReportSink {
+    async fn send_report(&self, text: String) -> Result<(), String> {
+        send_text(&self.bot, self.chat_id, &text).await.map_err(|e| e.to_string())
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum TelegramError {

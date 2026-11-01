@@ -15,6 +15,15 @@ use uuid::Uuid;
 #[cfg(feature = "local-whisper")]
 use guss_voice::{stt::WhisperStt, Stt};
 
+fn build_schedule_config(scheduler: &config::SchedulerConfig) -> guss_scheduler::ScheduleConfig {
+    let default = guss_scheduler::ScheduleConfig::default();
+    guss_scheduler::ScheduleConfig {
+        daily_cron: scheduler.daily_cron.clone().unwrap_or(default.daily_cron),
+        weekly_cron: scheduler.weekly_cron.clone().unwrap_or(default.weekly_cron),
+        monthly_cron: scheduler.monthly_cron.clone().unwrap_or(default.monthly_cron),
+    }
+}
+
 fn build_voice_support(config: &config::AppConfig, language: &str) -> VoiceSupport {
     let tts: Option<Arc<dyn Tts>> = match config.tts.provider.as_str() {
         "elevenlabs" => match (&config.tts.elevenlabs_api_key, &config.tts.elevenlabs_voice_id) {
@@ -96,6 +105,8 @@ async fn main() {
     let provider = OpenAiCompatibleProvider::new(config.llm.base_url.clone(), config.llm.api_key.clone(), config.llm.model.clone());
     let nlu = Nlu::new(provider, business.language.clone());
     let voice = Arc::new(build_voice_support(&config, &business.language));
+    let scheduler_store = store.clone();
+    let scheduler_business = business.clone();
     let orchestrator = Arc::new(Orchestrator::new(nlu, store, business));
 
     match config.channel.kind.as_str() {
@@ -112,6 +123,21 @@ async fn main() {
                 eprintln!("GUSS_CHANNEL__KIND=telegram but GUSS_CHANNEL__TELEGRAM_BOT_TOKEN is not set - see docs/setup-telegram.md.");
                 std::process::exit(1);
             };
+
+            let _job_scheduler = if let Some(chat_id) = config.channel.telegram_owner_chat_id {
+                let sink = Arc::new(telegram::TelegramReportSink::new(token, chat_id));
+                match guss_scheduler::start(scheduler_store, scheduler_business, sink, build_schedule_config(&config.channel.scheduler)).await {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        eprintln!("Failed to start the report scheduler: {e} - continuing without proactive EOD/weekly/monthly pushes.");
+                        None
+                    }
+                }
+            } else {
+                tracing::info!("GUSS_CHANNEL__TELEGRAM_OWNER_CHAT_ID not set - scheduled reports are disabled (on-demand \"report\" still works).");
+                None
+            };
+
             if let Err(e) = telegram::run(orchestrator, voice, token).await {
                 eprintln!("Telegram channel exited with an error: {e}");
                 std::process::exit(1);
@@ -137,6 +163,25 @@ async fn main() {
                 app_secret: app_secret.clone(),
                 listen_addr: config.channel.whatsapp_listen_addr.clone(),
             };
+
+            let _job_scheduler = if let Some(owner_number) = &config.channel.whatsapp_owner_phone_number {
+                let sink = Arc::new(guss_channels::whatsapp::WhatsAppReportSink::new(
+                    access_token.clone(),
+                    phone_number_id.clone(),
+                    owner_number.clone(),
+                ));
+                match guss_scheduler::start(scheduler_store, scheduler_business, sink, build_schedule_config(&config.channel.scheduler)).await {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        eprintln!("Failed to start the report scheduler: {e} - continuing without proactive EOD/weekly/monthly pushes.");
+                        None
+                    }
+                }
+            } else {
+                tracing::info!("GUSS_CHANNEL__WHATSAPP_OWNER_PHONE_NUMBER not set - scheduled reports are disabled (on-demand \"report\" still works).");
+                None
+            };
+
             if let Err(e) = guss_channels::whatsapp::run(orchestrator, voice, wa_config).await {
                 eprintln!("WhatsApp channel exited with an error: {e}");
                 std::process::exit(1);

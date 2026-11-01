@@ -269,14 +269,18 @@ async fn transcribe_media<P: LlmProvider, S: Store>(state: &AppState<P, S>, medi
 }
 
 async fn send_text<P: LlmProvider, S: Store>(state: &AppState<P, S>, to: &str, body: &str) -> Result<(), WhatsAppError> {
+    send_text_raw(&state.config.access_token, &state.config.phone_number_id, to, body).await
+}
+
+/// The actual Graph API call, factored out of `send_text` so the
+/// scheduler's `WhatsAppReportSink` (which has no `AppState`, just raw
+/// credentials) can reuse it for proactive EOD/weekly/monthly pushes.
+async fn send_text_raw(access_token: &str, phone_number_id: &str, to: &str, body: &str) -> Result<(), WhatsAppError> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "https://graph.facebook.com/{GRAPH_API_VERSION}/{}/messages",
-        state.config.phone_number_id
-    );
+    let url = format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/messages");
     let response = client
         .post(&url)
-        .bearer_auth(&state.config.access_token)
+        .bearer_auth(access_token)
         .json(&serde_json::json!({
             "messaging_product": "whatsapp",
             "to": to,
@@ -293,6 +297,28 @@ async fn send_text<P: LlmProvider, S: Store>(state: &AppState<P, S>, to: &str, b
         return Err(WhatsAppError::Api(format!("send message HTTP {status}: {text}")));
     }
     Ok(())
+}
+
+/// Delivers scheduled (EOD/weekly/monthly) reports to a fixed WhatsApp
+/// number - the business owner's own number, configured once via
+/// GUSS_CHANNEL__WHATSAPP_OWNER_PHONE_NUMBER.
+pub struct WhatsAppReportSink {
+    access_token: String,
+    phone_number_id: String,
+    to: String,
+}
+
+impl WhatsAppReportSink {
+    pub fn new(access_token: impl Into<String>, phone_number_id: impl Into<String>, to: impl Into<String>) -> Self {
+        Self { access_token: access_token.into(), phone_number_id: phone_number_id.into(), to: to.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl guss_scheduler::ReportSink for WhatsAppReportSink {
+    async fn send_report(&self, text: String) -> Result<(), String> {
+        send_text_raw(&self.access_token, &self.phone_number_id, &self.to, &text).await.map_err(|e| e.to_string())
+    }
 }
 
 async fn send_audio<P: LlmProvider, S: Store>(state: &AppState<P, S>, to: &str, clip: guss_voice::AudioClip) -> Result<(), WhatsAppError> {
