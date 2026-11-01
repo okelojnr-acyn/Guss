@@ -3,7 +3,7 @@ mod config;
 use std::sync::Arc;
 
 use config::AppConfig;
-use guss_channels::{cli, Orchestrator, VoiceSupport};
+use guss_channels::{cli, telegram, Orchestrator, VoiceSupport};
 use guss_core::domain::BusinessProfile;
 use guss_core::store::Store;
 use guss_llm::OpenAiCompatibleProvider;
@@ -95,8 +95,8 @@ async fn main() {
 
     let provider = OpenAiCompatibleProvider::new(config.llm.base_url.clone(), config.llm.api_key.clone(), config.llm.model.clone());
     let nlu = Nlu::new(provider, business.language.clone());
-    let voice = build_voice_support(&config, &business.language);
-    let orchestrator = Orchestrator::new(nlu, store, business);
+    let voice = Arc::new(build_voice_support(&config, &business.language));
+    let orchestrator = Arc::new(Orchestrator::new(nlu, store, business));
 
     match config.channel.kind.as_str() {
         "cli" => {
@@ -107,8 +107,18 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        "telegram" => {
+            let Some(token) = &config.channel.telegram_bot_token else {
+                eprintln!("GUSS_CHANNEL__KIND=telegram but GUSS_CHANNEL__TELEGRAM_BOT_TOKEN is not set - see docs/setup-telegram.md.");
+                std::process::exit(1);
+            };
+            if let Err(e) = telegram::run(orchestrator, voice, token).await {
+                eprintln!("Telegram channel exited with an error: {e}");
+                std::process::exit(1);
+            }
+        }
         other => {
-            eprintln!("Channel \"{other}\" isn't wired up yet - only \"cli\" works right now (Telegram/WhatsApp land in later milestones).");
+            eprintln!("Channel \"{other}\" isn't wired up yet - \"cli\" and \"telegram\" work right now (WhatsApp lands in a later milestone).");
             std::process::exit(1);
         }
     }

@@ -120,6 +120,34 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         let report = build_report(self.store.as_ref(), self.business.id, window, &self.business.default_currency).await?;
         Ok(render_report(&report, &self.business.name, &self.business.language))
     }
+
+    /// Entry point for webhook-delivered channels (Telegram, WhatsApp),
+    /// which can redeliver the same update more than once. Deduplicates by
+    /// the provider's own message id before doing anything else; returns
+    /// `Ok(None)` for a message already seen so the caller sends nothing
+    /// back (silently swallowing a redelivery, not a real exchange).
+    pub async fn handle_inbound(
+        &self,
+        conversation_key: &str,
+        source_channel: SourceChannel,
+        provider_message_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, OrchestratorError> {
+        let is_new = self.store.mark_message_processed(source_channel_tag(source_channel), provider_message_id).await?;
+        if !is_new {
+            tracing::debug!(provider_message_id, "skipping redelivered message");
+            return Ok(None);
+        }
+        self.handle_message(conversation_key, source_channel, text).await.map(Some)
+    }
+}
+
+fn source_channel_tag(channel: SourceChannel) -> &'static str {
+    match channel {
+        SourceChannel::Cli => "cli",
+        SourceChannel::Telegram => "telegram",
+        SourceChannel::WhatsApp => "whatsapp",
+    }
 }
 
 fn describe_event(event: &BusinessEvent, language: &str) -> String {

@@ -1,22 +1,14 @@
 use std::io::{BufRead, Write};
-use std::sync::Arc;
 
 use guss_core::domain::SourceChannel;
 use guss_core::store::{Store, TimeWindow};
 use guss_llm::LlmProvider;
-use guss_voice::{AudioFormat, Stt, Tts};
+use guss_voice::{AudioFormat, Tts};
 
 use crate::orchestrator::Orchestrator;
+use crate::voice_support::VoiceSupport;
 
 const CLI_CONVERSATION_KEY: &str = "cli";
-
-/// Optional voice support for the CLI channel. Both sides are independent:
-/// a business can run text-only (both `None`), STT-only, TTS-only, or both.
-#[derive(Default)]
-pub struct VoiceSupport {
-    pub stt: Option<Arc<dyn Stt>>,
-    pub tts: Option<Arc<dyn Tts>>,
-}
 
 async fn speak_reply(tts: &dyn Tts, reply: &str, output: &mut impl Write) {
     match tts.synthesize(reply).await {
