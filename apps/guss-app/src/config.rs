@@ -129,10 +129,20 @@ pub struct ChannelConfig {
     pub whatsapp_verify_token: Option<String>,
     pub whatsapp_access_token: Option<String>,
     pub whatsapp_phone_number_id: Option<String>,
+    /// Meta app secret, used to verify the X-Hub-Signature-256 header on
+    /// every webhook POST - without this check, anyone who finds the
+    /// webhook URL could inject fake messages into the ledger.
+    pub whatsapp_app_secret: Option<String>,
+    #[serde(default = "default_whatsapp_listen_addr")]
+    pub whatsapp_listen_addr: String,
 }
 
 fn default_channel_kind() -> String {
     "cli".to_string()
+}
+
+fn default_whatsapp_listen_addr() -> String {
+    "0.0.0.0:8080".to_string()
 }
 
 impl Default for ChannelConfig {
@@ -143,6 +153,8 @@ impl Default for ChannelConfig {
             whatsapp_verify_token: None,
             whatsapp_access_token: None,
             whatsapp_phone_number_id: None,
+            whatsapp_app_secret: None,
+            whatsapp_listen_addr: default_whatsapp_listen_addr(),
         }
     }
 }

@@ -117,8 +117,33 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        "whatsapp" => {
+            let (Some(verify_token), Some(access_token), Some(phone_number_id), Some(app_secret)) = (
+                &config.channel.whatsapp_verify_token,
+                &config.channel.whatsapp_access_token,
+                &config.channel.whatsapp_phone_number_id,
+                &config.channel.whatsapp_app_secret,
+            ) else {
+                eprintln!(
+                    "GUSS_CHANNEL__KIND=whatsapp requires GUSS_CHANNEL__WHATSAPP_VERIFY_TOKEN, \
+                     _ACCESS_TOKEN, _PHONE_NUMBER_ID, and _APP_SECRET - see docs/setup-whatsapp-cloud-api.md."
+                );
+                std::process::exit(1);
+            };
+            let wa_config = guss_channels::whatsapp::WhatsAppConfig {
+                verify_token: verify_token.clone(),
+                access_token: access_token.clone(),
+                phone_number_id: phone_number_id.clone(),
+                app_secret: app_secret.clone(),
+                listen_addr: config.channel.whatsapp_listen_addr.clone(),
+            };
+            if let Err(e) = guss_channels::whatsapp::run(orchestrator, voice, wa_config).await {
+                eprintln!("WhatsApp channel exited with an error: {e}");
+                std::process::exit(1);
+            }
+        }
         other => {
-            eprintln!("Channel \"{other}\" isn't wired up yet - \"cli\" and \"telegram\" work right now (WhatsApp lands in a later milestone).");
+            eprintln!("Channel \"{other}\" isn't wired up yet - \"cli\", \"telegram\", and \"whatsapp\" work right now.");
             std::process::exit(1);
         }
     }
