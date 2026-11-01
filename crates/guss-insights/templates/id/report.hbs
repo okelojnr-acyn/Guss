@@ -1,0 +1,17 @@
+Ini laporan untuk {{business_name}}, mencakup {{window_label}}.
+
+Pendapatan sebesar {{total_revenue}} dan pengeluaran sebesar {{total_expenses}}, dengan laba bersih {{net_cash_basis}}.
+{{#if gross_margin}}Berdasarkan biaya restock yang tercatat, estimasi margin kotor adalah {{gross_margin}}.
+{{/if}}
+{{#if top_sellers_by_quantity}}Produk paling banyak terjual: {{#each top_sellers_by_quantity}}{{item_name}} ({{quantity}} terjual){{#unless @last}}, {{/unless}}{{/each}}.
+{{/if}}
+{{#if bottom_sellers_by_quantity}}Produk paling lambat terjual: {{#each bottom_sellers_by_quantity}}{{item_name}} ({{quantity}} terjual){{#unless @last}}, {{/unless}}{{/each}}.
+{{/if}}
+{{#if low_stock}}Stok yang mulai menipis: {{#each low_stock}}{{item_name}} (sisa {{current_quantity}}, batas restock {{reorder_threshold}}){{#unless @last}}, {{/unless}}{{/each}}. Sebaiknya segera restock.
+{{/if}}
+{{#if declining_no_threshold}}Produk ini tren-nya menurun dan belum punya batas restock: {{#each declining_no_threshold}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}.
+{{/if}}
+{{#if recurring_revenue}}Perkiraan pendapatan berulang bulanan: {{#each recurring_revenue}}{{label}} sebesar {{monthly_amount}}{{#unless @last}}, {{/unless}}{{/each}}.
+{{/if}}
+{{#if recurring_expenses}}Perkiraan biaya berulang bulanan: {{#each recurring_expenses}}{{label}} sebesar {{monthly_amount}}{{#unless @last}}, {{/unless}}{{/each}}.
+{{/if}}
