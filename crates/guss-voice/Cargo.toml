@@ -4,3 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+async-trait = "0.1.92"
+reqwest = { version = "0.13.5", features = ["json"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tracing = "0.1.44"
+whisper-rs = { version = "0.16.0", optional = true }
+
+[features]
+default = ["local-whisper"]
+# Real users should build with this on (the default) for offline/free STT -
+# it requires a C/C++ toolchain + CMake to compile whisper.cpp, same as any
+# native-dependent Rust crate. Build with --no-default-features to skip it
+# (e.g. on a machine without a C++ toolchain yet) and still get Tts/ffmpeg
+# conversion working - see docs/setup-elevenlabs-piper.md.
+local-whisper = ["dep:whisper-rs"]

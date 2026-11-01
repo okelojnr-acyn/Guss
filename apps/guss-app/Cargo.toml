@@ -3,6 +3,13 @@ name = "guss"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Off by default at the workspace level since it requires a C/C++
+# toolchain + CMake to build whisper.cpp. Build with --features
+# local-whisper for offline/free speech-to-text - see
+# docs/setup-elevenlabs-piper.md.
+local-whisper = ["guss-voice/local-whisper"]
+
 [dependencies]
 dotenvy = "0.15.7"
 figment = { version = "0.10.19", features = ["env", "toml"] }
@@ -11,6 +18,7 @@ guss-core = { version = "0.1.0", path = "../../crates/guss-core" }
 guss-llm = { version = "0.1.0", path = "../../crates/guss-llm" }
 guss-nlu = { version = "0.1.0", path = "../../crates/guss-nlu" }
 guss-store = { version = "0.1.0", path = "../../crates/guss-store" }
+guss-voice = { version = "0.1.0", path = "../../crates/guss-voice", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }

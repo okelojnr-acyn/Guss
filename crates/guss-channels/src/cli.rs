@@ -1,12 +1,42 @@
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 
 use guss_core::domain::SourceChannel;
 use guss_core::store::{Store, TimeWindow};
 use guss_llm::LlmProvider;
+use guss_voice::{AudioFormat, Stt, Tts};
 
 use crate::orchestrator::Orchestrator;
 
 const CLI_CONVERSATION_KEY: &str = "cli";
+
+/// Optional voice support for the CLI channel. Both sides are independent:
+/// a business can run text-only (both `None`), STT-only, TTS-only, or both.
+#[derive(Default)]
+pub struct VoiceSupport {
+    pub stt: Option<Arc<dyn Stt>>,
+    pub tts: Option<Arc<dyn Tts>>,
+}
+
+async fn speak_reply(tts: &dyn Tts, reply: &str, output: &mut impl Write) {
+    match tts.synthesize(reply).await {
+        Ok(clip) => {
+            let ext = match clip.format {
+                AudioFormat::Wav => "wav",
+                AudioFormat::Mp3 => "mp3",
+            };
+            let path = format!("guss_reply_{}.{ext}", chrono::Utc::now().timestamp_millis());
+            if let Err(e) = tokio::fs::write(&path, &clip.bytes).await {
+                let _ = writeln!(output, "(voice synthesis saved failed: {e})");
+            } else {
+                let _ = writeln!(output, "(voice reply saved to {path})");
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(output, "(voice synthesis failed: {e})");
+        }
+    }
+}
 
 fn parse_report_window(rest: &str) -> TimeWindow {
     match rest.trim().to_lowercase().as_str() {
@@ -21,12 +51,13 @@ fn parse_report_window(rest: &str) -> TimeWindow {
 /// integration test driving it against an in-memory buffer.
 pub async fn run<P: LlmProvider, S: Store>(
     orchestrator: &Orchestrator<P, S>,
+    voice: &VoiceSupport,
     mut input: impl BufRead,
     mut output: impl Write,
 ) -> std::io::Result<()> {
     writeln!(
         output,
-        "Guss is ready for \"{}\". Type what happened in the business, \"report [day|week|month]\", or \"exit\".",
+        "Guss is ready for \"{}\". Type what happened in the business, \"report [day|week|month]\", \"voice <path to audio file>\", or \"exit\".",
         orchestrator.business().name
     )?;
 
@@ -46,19 +77,49 @@ pub async fn run<P: LlmProvider, S: Store>(
             break;
         }
 
-        let reply = if let Some(rest) = text.to_lowercase().strip_prefix("report") {
+        let reply = if let Some(path) = text.strip_prefix("voice ") {
+            match transcribe_file(voice, path.trim()).await {
+                Ok(transcript) => {
+                    writeln!(output, "(heard: {transcript})")?;
+                    orchestrator.handle_message(CLI_CONVERSATION_KEY, SourceChannel::Cli, &transcript).await
+                }
+                Err(e) => Err(e.into()),
+            }
+        } else if let Some(rest) = text.to_lowercase().strip_prefix("report") {
             orchestrator.handle_report(parse_report_window(rest)).await
         } else {
             orchestrator.handle_message(CLI_CONVERSATION_KEY, SourceChannel::Cli, text).await
         };
 
         match reply {
-            Ok(text) => writeln!(output, "{text}")?,
+            Ok(reply_text) => {
+                writeln!(output, "{reply_text}")?;
+                if let Some(tts) = &voice.tts {
+                    speak_reply(tts.as_ref(), &reply_text, &mut output).await;
+                }
+            }
             Err(e) => writeln!(output, "Something went wrong: {e}")?,
         }
     }
 
     Ok(())
+}
+
+async fn transcribe_file(voice: &VoiceSupport, path: &str) -> Result<String, crate::orchestrator::OrchestratorError> {
+    let Some(stt) = &voice.stt else {
+        return Err(crate::orchestrator::OrchestratorError::VoiceNotConfigured(
+            "no speech-to-text provider is configured (set GUSS_STT__* in .env)".to_string(),
+        ));
+    };
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| crate::orchestrator::OrchestratorError::VoiceNotConfigured(format!("couldn't read {path}: {e}")))?;
+    let wav = guss_voice::convert::to_wav16k_mono(&bytes)
+        .await
+        .map_err(|e| crate::orchestrator::OrchestratorError::VoiceNotConfigured(e.to_string()))?;
+    stt.transcribe(&wav)
+        .await
+        .map_err(|e| crate::orchestrator::OrchestratorError::VoiceNotConfigured(e.to_string()))
 }
 
 #[cfg(test)]
@@ -115,7 +176,7 @@ mod tests {
 
         let input = Cursor::new(b"sold 3 bags of rice at 500 each\nreport\nexit\n".to_vec());
         let mut output = Vec::new();
-        run(&orchestrator, input, &mut output).await.unwrap();
+        run(&orchestrator, &VoiceSupport::default(), input, &mut output).await.unwrap();
 
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("Sold: 3 rice"), "expected sale confirmation, got:\n{text}");
@@ -139,7 +200,7 @@ mod tests {
 
         let input = Cursor::new(b"sold 3 bags of rice at 500 each\nno\nreport\nexit\n".to_vec());
         let mut output = Vec::new();
-        run(&orchestrator, input, &mut output).await.unwrap();
+        run(&orchestrator, &VoiceSupport::default(), input, &mut output).await.unwrap();
 
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("Undone."));

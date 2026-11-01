@@ -27,6 +27,8 @@ pub enum OrchestratorError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Nlu(#[from] NluError),
+    #[error("voice input/output isn't available: {0}")]
+    VoiceNotConfigured(String),
 }
 
 struct PendingCommit {

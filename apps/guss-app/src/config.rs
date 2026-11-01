@@ -64,6 +64,9 @@ pub struct SttConfig {
     /// per docs/setup guides (not bundled in the repo).
     #[serde(default = "default_whisper_model_path")]
     pub whisper_model_path: String,
+    /// Optional Silero VAD model path - recommended (reduces whisper's
+    /// known hallucination-on-silence failure mode) but not required.
+    pub whisper_vad_model_path: Option<String>,
 }
 
 fn default_whisper_model_path() -> String {
@@ -74,6 +77,7 @@ impl Default for SttConfig {
     fn default() -> Self {
         Self {
             whisper_model_path: default_whisper_model_path(),
+            whisper_vad_model_path: None,
         }
     }
 }
@@ -86,10 +90,22 @@ pub struct TtsConfig {
     pub provider: String,
     pub elevenlabs_api_key: Option<String>,
     pub elevenlabs_voice_id: Option<String>,
+    #[serde(default = "default_piper_binary")]
+    pub piper_binary: String,
+    #[serde(default = "default_piper_voice_model_path")]
+    pub piper_voice_model_path: String,
 }
 
 fn default_tts_provider() -> String {
     "piper".to_string()
+}
+
+fn default_piper_binary() -> String {
+    "piper".to_string()
+}
+
+fn default_piper_voice_model_path() -> String {
+    "models/voice.onnx".to_string()
 }
 
 impl Default for TtsConfig {
@@ -98,6 +114,8 @@ impl Default for TtsConfig {
             provider: default_tts_provider(),
             elevenlabs_api_key: None,
             elevenlabs_voice_id: None,
+            piper_binary: default_piper_binary(),
+            piper_voice_model_path: default_piper_voice_model_path(),
         }
     }
 }
