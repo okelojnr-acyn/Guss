@@ -1,0 +1,24 @@
+[package]
+name = "guss-sttbench"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# Off by default, same as the guss binary - needs a C/C++ toolchain +
+# CMake to build whisper.cpp. Without it, `--engine whisper` fails with a
+# clear error at runtime rather than being unavailable at compile time -
+# see docs/setup-elevenlabs-piper.md.
+local-whisper = ["guss-voice/local-whisper"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+guss-core = { version = "0.1.0", path = "../guss-core" }
+guss-llm = { version = "0.1.0", path = "../guss-llm" }
+guss-nlu = { version = "0.1.0", path = "../guss-nlu" }
+guss-voice = { version = "0.1.0", path = "../guss-voice", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+uuid = { version = "1.29.0", features = ["v4"] }

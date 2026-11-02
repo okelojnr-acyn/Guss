@@ -1268,6 +1268,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "guss-sttbench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "guss-core",
+ "guss-llm",
+ "guss-nlu",
+ "guss-voice",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "guss-voice"
 version = "0.1.0"
 dependencies = [

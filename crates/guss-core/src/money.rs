@@ -84,6 +84,14 @@ impl CurrencyAmount {
             currency,
         }
     }
+
+    /// Inverse of `new`/`Money::from_major` - the decimal amount a human
+    /// would read, e.g. `CurrencyAmount::new(12.5, "USD").major_units()`
+    /// returns `12.5`.
+    pub fn major_units(&self) -> f64 {
+        let decimals = decimals_for_currency(&self.currency);
+        self.amount.minor_units as f64 / 10i64.pow(decimals) as f64
+    }
 }
 
 impl fmt::Display for CurrencyAmount {
@@ -113,6 +121,12 @@ mod tests {
         let amt = CurrencyAmount::new(15000.0, "IDR");
         assert_eq!(amt.amount.minor_units, 15000);
         assert_eq!(amt.amount.format_in("IDR"), "15000");
+    }
+
+    #[test]
+    fn major_units_is_the_inverse_of_new() {
+        assert_eq!(CurrencyAmount::new(12.5, "USD").major_units(), 12.5);
+        assert_eq!(CurrencyAmount::new(15000.0, "IDR").major_units(), 15000.0);
     }
 
     #[test]
