@@ -1,0 +1,8 @@
+// Example manifest - template only, these audio files don't exist.
+// Copy this file, point `path` at real labelled voice notes, and run
+// `guss-sttbench` against it. See ../README.md for the field reference.
+{"path": "audio/001.wav", "language": "zu", "expected_amount": 150.0, "expected_currency": "ZAR", "expected_category": "stock"}
+{"path": "audio/002.wav", "language": "st", "expected_amount": 45.5, "expected_currency": "ZAR", "expected_category": "cash"}
+{"path": "audio/003.wav", "language": "af", "expected_amount": 320.0, "expected_currency": "ZAR", "expected_category": "bills", "reference_transcript": "ek het 320 rand betaal vir rekeninge"}
+{"path": "audio/004.wav", "language": "en", "expected_amount": 500.0, "expected_currency": "ZAR", "expected_category": "stock", "reference_transcript": "bought five hundred rand of stock today"}
+{"path": "audio/005.wav", "language": "zu", "code_switched": true, "expected_amount": 1200.0, "expected_currency": "ZAR", "expected_category": "stock", "reference_transcript": "ngithenge istock for one thousand two hundred rand"}

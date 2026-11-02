@@ -10,6 +10,7 @@ members = [
     "crates/guss-insights",
     "crates/guss-channels",
     "crates/guss-scheduler",
+    "crates/guss-sttbench",
 ]
 
 [workspace.package]
