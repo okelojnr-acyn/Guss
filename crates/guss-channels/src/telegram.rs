@@ -25,14 +25,19 @@ pub struct TelegramReportSink {
 
 impl TelegramReportSink {
     pub fn new(bot_token: &str, chat_id: i64) -> Self {
-        Self { bot: Bot::new(bot_token), chat_id: ChatId(chat_id) }
+        Self {
+            bot: Bot::new(bot_token),
+            chat_id: ChatId(chat_id),
+        }
     }
 }
 
 #[async_trait]
 impl ReportSink for TelegramReportSink {
     async fn send_report(&self, text: String) -> Result<(), String> {
-        send_text(&self.bot, self.chat_id, &text).await.map_err(|e| e.to_string())
+        send_text(&self.bot, self.chat_id, &text)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -53,7 +58,11 @@ const MAX_CONCURRENT_MESSAGES: usize = 8;
 /// capped at `MAX_CONCURRENT_MESSAGES` concurrent tasks via a semaphore
 /// acquired before each spawn, so a burst of messages can't spawn
 /// unboundedly many tasks.
-pub async fn run<P, S>(orchestrator: Arc<Orchestrator<P, S>>, voice: Arc<VoiceSupport>, bot_token: &str) -> Result<(), TelegramError>
+pub async fn run<P, S>(
+    orchestrator: Arc<Orchestrator<P, S>>,
+    voice: Arc<VoiceSupport>,
+    bot_token: &str,
+) -> Result<(), TelegramError>
 where
     P: LlmProvider + Send + Sync + 'static,
     S: Store + Send + Sync + 'static,
@@ -77,7 +86,11 @@ where
             offset = offset.max(update.id.0 as i32 + 1);
 
             if let UpdateKind::Message(msg) = update.kind {
-                let permit = semaphore.clone().acquire_owned().await.expect("semaphore never closed");
+                let permit = semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore never closed");
                 let orchestrator = orchestrator.clone();
                 let voice = voice.clone();
                 let bot = bot.clone();
@@ -116,17 +129,32 @@ where
         match transcribe_voice_note(voice, bot, telegram_voice.file.id.clone()).await {
             Ok(transcript) => transcript,
             Err(e) => {
-                send_text(bot, chat_id, &format!("Couldn't understand that voice note: {e}")).await?;
+                send_text(
+                    bot,
+                    chat_id,
+                    &format!("Couldn't understand that voice note: {e}"),
+                )
+                .await?;
                 return Ok(());
             }
         }
     } else {
-        send_text(bot, chat_id, "I can only read text or voice notes right now.").await?;
+        send_text(
+            bot,
+            chat_id,
+            "I can only read text or voice notes right now.",
+        )
+        .await?;
         return Ok(());
     };
 
     let reply = orchestrator
-        .handle_inbound(&conversation_key, SourceChannel::Telegram, &provider_message_id, &text)
+        .handle_inbound(
+            &conversation_key,
+            SourceChannel::Telegram,
+            &provider_message_id,
+            &text,
+        )
         .await
         .map_err(|e| TelegramError::Api(e.to_string()))?;
 
@@ -147,7 +175,10 @@ where
                 // "voice message" bubble requires OGG/Opus specifically,
                 // which Guss's TTS backends don't produce - this plays as
                 // a normal audio attachment instead.
-                if let Err(e) = bot.send_audio(chat_id, InputFile::memory(clip.bytes).file_name(file_name)).await {
+                if let Err(e) = bot
+                    .send_audio(chat_id, InputFile::memory(clip.bytes).file_name(file_name))
+                    .await
+                {
                     tracing::warn!(error = %e, "failed to send TTS audio to Telegram");
                 }
             }
@@ -158,13 +189,26 @@ where
     Ok(())
 }
 
-async fn transcribe_voice_note(voice: &VoiceSupport, bot: &Bot, file_id: teloxide::types::FileId) -> Result<String, TelegramError> {
+async fn transcribe_voice_note(
+    voice: &VoiceSupport,
+    bot: &Bot,
+    file_id: teloxide::types::FileId,
+) -> Result<String, TelegramError> {
     let Some(stt) = &voice.stt else {
-        return Err(TelegramError::Api("no speech-to-text provider is configured".to_string()));
+        return Err(TelegramError::Api(
+            "no speech-to-text provider is configured".to_string(),
+        ));
     };
 
-    let file = bot.get_file(file_id).await.map_err(|e| TelegramError::Api(e.to_string()))?;
-    let url = format!("https://api.telegram.org/file/bot{}/{}", bot.token(), file.path);
+    let file = bot
+        .get_file(file_id)
+        .await
+        .map_err(|e| TelegramError::Api(e.to_string()))?;
+    let url = format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        bot.token(),
+        file.path
+    );
     let bytes = reqwest::get(&url)
         .await
         .map_err(|e| TelegramError::Api(e.to_string()))?
@@ -172,12 +216,18 @@ async fn transcribe_voice_note(voice: &VoiceSupport, bot: &Bot, file_id: teloxid
         .await
         .map_err(|e| TelegramError::Api(e.to_string()))?;
 
-    let wav = guss_voice::convert::to_wav16k_mono(&bytes).await.map_err(|e| TelegramError::Api(e.to_string()))?;
-    stt.transcribe(&wav).await.map_err(|e| TelegramError::Api(e.to_string()))
+    let wav = guss_voice::convert::to_wav16k_mono(&bytes)
+        .await
+        .map_err(|e| TelegramError::Api(e.to_string()))?;
+    stt.transcribe(&wav)
+        .await
+        .map_err(|e| TelegramError::Api(e.to_string()))
 }
 
 async fn send_text(bot: &Bot, chat_id: ChatId, text: &str) -> Result<(), TelegramError> {
-    bot.send_message(chat_id, text).await.map_err(|e| TelegramError::Api(e.to_string()))?;
+    bot.send_message(chat_id, text)
+        .await
+        .map_err(|e| TelegramError::Api(e.to_string()))?;
     Ok(())
 }
 
@@ -189,7 +239,7 @@ mod tests {
     use guss_llm::{JsonCompletionRequest, LlmError, LlmProvider};
     use guss_nlu::Nlu;
     use guss_store::SqliteStore;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use teloxide::types::Message;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -242,10 +292,15 @@ mod tests {
         let orchestrator = test_orchestrator().await;
         let voice = VoiceSupport::default();
 
-        let message: Message = serde_json::from_value(sample_message_json(7, 42, "slow day today")).unwrap();
+        let message: Message =
+            serde_json::from_value(sample_message_json(7, 42, "slow day today")).unwrap();
 
-        handle_message(&orchestrator, &voice, &bot, message.clone()).await.unwrap();
-        handle_message(&orchestrator, &voice, &bot, message).await.unwrap();
+        handle_message(&orchestrator, &voice, &bot, message.clone())
+            .await
+            .unwrap();
+        handle_message(&orchestrator, &voice, &bot, message)
+            .await
+            .unwrap();
 
         server.verify().await;
     }

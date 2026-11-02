@@ -88,7 +88,12 @@ impl CurrencyAmount {
 
 impl fmt::Display for CurrencyAmount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.amount.format_in(&self.currency), self.currency)
+        write!(
+            f,
+            "{} {}",
+            self.amount.format_in(&self.currency),
+            self.currency
+        )
     }
 }
 

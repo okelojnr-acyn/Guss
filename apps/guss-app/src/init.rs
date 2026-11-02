@@ -5,19 +5,45 @@ use std::io::{BufRead, Write};
 /// `guss init` command (stdin/stdout) and tests (an in-memory buffer) run
 /// through the exact same code path.
 pub fn run_wizard(mut input: impl BufRead, mut output: impl Write) -> std::io::Result<String> {
-    writeln!(output, "Guss setup - answer a few questions, then copy the result into a .env file (or let `guss init > .env` do it for you).\n")?;
+    writeln!(
+        output,
+        "Guss setup - answer a few questions, then copy the result into a .env file (or let `guss init > .env` do it for you).\n"
+    )?;
 
     let name = ask(&mut input, &mut output, "Business name", "My Shop")?;
-    let currency = ask(&mut input, &mut output, "Default currency (ISO 4217, e.g. USD, IDR)", "USD")?;
-    let language = ask_choice(&mut input, &mut output, "Language", &[("en", "English"), ("id", "Bahasa Indonesia")], "en")?;
-    let timezone = ask(&mut input, &mut output, "Timezone (IANA, e.g. Asia/Jakarta)", "UTC")?;
+    let currency = ask(
+        &mut input,
+        &mut output,
+        "Default currency (ISO 4217, e.g. USD, IDR)",
+        "USD",
+    )?;
+    let language = ask_choice(
+        &mut input,
+        &mut output,
+        "Language",
+        &[("en", "English"), ("id", "Bahasa Indonesia")],
+        "en",
+    )?;
+    let timezone = ask(
+        &mut input,
+        &mut output,
+        "Timezone (IANA, e.g. Asia/Jakarta)",
+        "UTC",
+    )?;
 
     writeln!(output, "\n--- LLM ---")?;
     let llm_choice = ask_choice(
         &mut input,
         &mut output,
         "LLM provider",
-        &[("ollama", "Ollama - local, free, no API key, needs Ollama running"), ("groq", "Groq - free tier, fast, needs an API key"), ("openai", "OpenAI - needs an API key")],
+        &[
+            (
+                "ollama",
+                "Ollama - local, free, no API key, needs Ollama running",
+            ),
+            ("groq", "Groq - free tier, fast, needs an API key"),
+            ("openai", "OpenAI - needs an API key"),
+        ],
         "ollama",
     )?;
     let (llm_base_url, llm_model_default) = match llm_choice.as_str() {
@@ -37,7 +63,17 @@ pub fn run_wizard(mut input: impl BufRead, mut output: impl Write) -> std::io::R
         &mut input,
         &mut output,
         "Channel",
-        &[("cli", "CLI - instant, zero setup, good for trying Guss out"), ("telegram", "Telegram - free bot token, voice notes supported"), ("whatsapp", "WhatsApp Cloud API - official, free tier, needs a Meta app")],
+        &[
+            ("cli", "CLI - instant, zero setup, good for trying Guss out"),
+            (
+                "telegram",
+                "Telegram - free bot token, voice notes supported",
+            ),
+            (
+                "whatsapp",
+                "WhatsApp Cloud API - official, free tier, needs a Meta app",
+            ),
+        ],
         "cli",
     )?;
 
@@ -50,14 +86,44 @@ pub fn run_wizard(mut input: impl BufRead, mut output: impl Write) -> std::io::R
     let mut whatsapp_owner_phone_number = String::new();
 
     if channel == "telegram" {
-        telegram_bot_token = ask(&mut input, &mut output, "Telegram bot token (see docs/setup-telegram.md)", "")?;
-        telegram_owner_chat_id = ask(&mut input, &mut output, "Your Telegram chat id, for scheduled reports (leave blank to disable)", "")?;
+        telegram_bot_token = ask(
+            &mut input,
+            &mut output,
+            "Telegram bot token (see docs/setup-telegram.md)",
+            "",
+        )?;
+        telegram_owner_chat_id = ask(
+            &mut input,
+            &mut output,
+            "Your Telegram chat id, for scheduled reports (leave blank to disable)",
+            "",
+        )?;
     } else if channel == "whatsapp" {
-        whatsapp_verify_token = ask(&mut input, &mut output, "WhatsApp webhook verify token (you choose this)", "")?;
-        whatsapp_access_token = ask(&mut input, &mut output, "WhatsApp Graph API access token", "")?;
+        whatsapp_verify_token = ask(
+            &mut input,
+            &mut output,
+            "WhatsApp webhook verify token (you choose this)",
+            "",
+        )?;
+        whatsapp_access_token = ask(
+            &mut input,
+            &mut output,
+            "WhatsApp Graph API access token",
+            "",
+        )?;
         whatsapp_phone_number_id = ask(&mut input, &mut output, "WhatsApp phone number id", "")?;
-        whatsapp_app_secret = ask(&mut input, &mut output, "Meta app secret (for webhook signature verification)", "")?;
-        whatsapp_owner_phone_number = ask(&mut input, &mut output, "Your WhatsApp number, for scheduled reports (leave blank to disable)", "")?;
+        whatsapp_app_secret = ask(
+            &mut input,
+            &mut output,
+            "Meta app secret (for webhook signature verification)",
+            "",
+        )?;
+        whatsapp_owner_phone_number = ask(
+            &mut input,
+            &mut output,
+            "Your WhatsApp number, for scheduled reports (leave blank to disable)",
+            "",
+        )?;
     }
 
     writeln!(output, "\n--- Voice ---")?;
@@ -65,7 +131,16 @@ pub fn run_wizard(mut input: impl BufRead, mut output: impl Write) -> std::io::R
         &mut input,
         &mut output,
         "Text-to-speech",
-        &[("piper", "Piper - free, local, needs the piper CLI binary installed"), ("elevenlabs", "ElevenLabs - needs an API key, higher quality")],
+        &[
+            (
+                "piper",
+                "Piper - free, local, needs the piper CLI binary installed",
+            ),
+            (
+                "elevenlabs",
+                "ElevenLabs - needs an API key, higher quality",
+            ),
+        ],
         "piper",
     )?;
     let mut elevenlabs_api_key = String::new();
@@ -104,11 +179,19 @@ pub fn run_wizard(mut input: impl BufRead, mut output: impl Write) -> std::io::R
          GUSS_CHANNEL__WHATSAPP_LISTEN_ADDR=0.0.0.0:8080\n"
     );
 
-    writeln!(output, "\nDone. The .env content follows below - redirect it to a file (guss init > .env) and run `guss`.")?;
+    writeln!(
+        output,
+        "\nDone. The .env content follows below - redirect it to a file (guss init > .env) and run `guss`."
+    )?;
     Ok(env)
 }
 
-fn ask(input: &mut impl BufRead, output: &mut impl Write, prompt: &str, default: &str) -> std::io::Result<String> {
+fn ask(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    prompt: &str,
+    default: &str,
+) -> std::io::Result<String> {
     if default.is_empty() {
         write!(output, "{prompt}: ")?;
     } else {
@@ -119,7 +202,11 @@ fn ask(input: &mut impl BufRead, output: &mut impl Write, prompt: &str, default:
     let mut line = String::new();
     input.read_line(&mut line)?;
     let answer = line.trim();
-    Ok(if answer.is_empty() { default.to_string() } else { answer.to_string() })
+    Ok(if answer.is_empty() {
+        default.to_string()
+    } else {
+        answer.to_string()
+    })
 }
 
 fn ask_choice(
@@ -134,11 +221,26 @@ fn ask_choice(
         let marker = if *key == default { "*" } else { " " };
         writeln!(output, "  {marker} {key} - {desc}")?;
     }
-    let answer = ask(input, output, &format!("Choose ({})", choices.iter().map(|(k, _)| *k).collect::<Vec<_>>().join("/")), default)?;
+    let answer = ask(
+        input,
+        output,
+        &format!(
+            "Choose ({})",
+            choices
+                .iter()
+                .map(|(k, _)| *k)
+                .collect::<Vec<_>>()
+                .join("/")
+        ),
+        default,
+    )?;
     if choices.iter().any(|(k, _)| *k == answer) {
         Ok(answer)
     } else {
-        writeln!(output, "Didn't recognize \"{answer}\" - using default \"{default}\".")?;
+        writeln!(
+            output,
+            "Didn't recognize \"{answer}\" - using default \"{default}\"."
+        )?;
         Ok(default.to_string())
     }
 }

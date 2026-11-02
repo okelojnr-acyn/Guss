@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in Guss doesn't work the way it should.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what actually happened.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      options:
+        - CLI
+        - Telegram
+        - WhatsApp
+    validations:
+      required: true
+
+  - type: dropdown
+    id: store
+    attributes:
+      label: Storage backend
+      options:
+        - SQLite (default)
+        - Postgres (--features postgres)
+    validations:
+      required: true
+
+  - type: input
+    id: llm
+    attributes:
+      label: LLM provider
+      description: Ollama, Groq, OpenAI, or another OpenAI-compatible endpoint - and the model name.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error output
+      description: Run with `RUST_LOG=debug` if you can - please redact API keys, tokens, and secrets before pasting.
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Guss version / commit
+    validations:
+      required: true

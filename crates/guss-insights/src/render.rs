@@ -100,12 +100,18 @@ pub fn render_report(data: &ReportData, business_name: &str, language: &str) -> 
         recurring_revenue: data
             .recurring_revenue
             .iter()
-            .map(|m| MrrLineView { label: m.label.clone(), monthly_amount: m.monthly_amount.to_string() })
+            .map(|m| MrrLineView {
+                label: m.label.clone(),
+                monthly_amount: m.monthly_amount.to_string(),
+            })
             .collect(),
         recurring_expenses: data
             .recurring_expenses
             .iter()
-            .map(|m| MrrLineView { label: m.label.clone(), monthly_amount: m.monthly_amount.to_string() })
+            .map(|m| MrrLineView {
+                label: m.label.clone(),
+                monthly_amount: m.monthly_amount.to_string(),
+            })
             .collect(),
     };
 
@@ -128,12 +134,23 @@ mod tests {
             total_expenses: CurrencyAmount::new(200.0, "USD"),
             net_cash_basis: CurrencyAmount::new(1300.0, "USD"),
             gross_margin: Some(CurrencyAmount::new(900.0, "USD")),
-            top_sellers_by_quantity: vec![ItemStat { item_name: "rice".into(), quantity: 10.0, revenue: CurrencyAmount::new(500.0, "USD") }],
+            top_sellers_by_quantity: vec![ItemStat {
+                item_name: "rice".into(),
+                quantity: 10.0,
+                revenue: CurrencyAmount::new(500.0, "USD"),
+            }],
             bottom_sellers_by_quantity: vec![],
             top_sellers_by_revenue: vec![],
-            low_stock: vec![StockLevel { item_name: "soap".into(), current_quantity: 2.0, reorder_threshold: Some(5.0) }],
+            low_stock: vec![StockLevel {
+                item_name: "soap".into(),
+                current_quantity: 2.0,
+                reorder_threshold: Some(5.0),
+            }],
             declining_no_threshold: vec!["candles".into()],
-            recurring_revenue: vec![MrrLine { label: "Acme retainer".into(), monthly_amount: CurrencyAmount::new(433.0, "USD") }],
+            recurring_revenue: vec![MrrLine {
+                label: "Acme retainer".into(),
+                monthly_amount: CurrencyAmount::new(433.0, "USD"),
+            }],
             recurring_expenses: vec![],
         }
     }

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -45,7 +45,11 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             api_key,
@@ -87,7 +91,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
             request = request.bearer_auth(key);
         }
 
-        let response = request.send().await.map_err(|e| LlmError::Request(e.to_string()))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| LlmError::Request(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -95,7 +102,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
             return Err(LlmError::Request(format!("HTTP {status}: {text}")));
         }
 
-        let body: Value = response.json().await.map_err(|e| LlmError::Request(e.to_string()))?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Request(e.to_string()))?;
 
         let content = body
             .get("choices")

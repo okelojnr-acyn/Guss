@@ -4,4 +4,4 @@ pub mod store;
 
 pub use domain::*;
 pub use money::{CurrencyAmount, Money};
-pub use store::{Store, StoreError, StockLevel, TimeWindow};
+pub use store::{StockLevel, Store, StoreError, TimeWindow};

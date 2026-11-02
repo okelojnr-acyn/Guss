@@ -6,7 +6,7 @@ use guss_core::domain::{BusinessEvent, BusinessProfile, SourceChannel};
 use guss_core::store::{Store, StoreError, TimeWindow};
 use guss_insights::{build_report, render_report};
 use guss_llm::LlmProvider;
-use guss_nlu::{extract_keywords, Nlu, NluError};
+use guss_nlu::{Nlu, NluError, extract_keywords};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -50,7 +50,12 @@ pub struct Orchestrator<P: LlmProvider, S: Store> {
 
 impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
     pub fn new(nlu: Nlu<P>, store: Arc<S>, business: BusinessProfile) -> Self {
-        Self { nlu, store, business, pending: Mutex::new(HashMap::new()) }
+        Self {
+            nlu,
+            store,
+            business,
+            pending: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn business(&self) -> &BusinessProfile {
@@ -67,16 +72,28 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
     ) -> Result<String, OrchestratorError> {
         let trimmed = text.trim().to_lowercase();
         if UNDO_WORDS.contains(&trimmed.as_str()) {
-            return Ok(self.handle_undo(conversation_key).await?);
+            return self.handle_undo(conversation_key).await;
         }
 
         let keywords = extract_keywords(text);
-        let context = self.store.search_documents(self.business.id, &keywords, 3).await?;
-        let context_snippets: Vec<String> = context.into_iter().map(|d| format!("{}: {}", d.title, d.content)).collect();
+        let context = self
+            .store
+            .search_documents(self.business.id, &keywords, 3)
+            .await?;
+        let context_snippets: Vec<String> = context
+            .into_iter()
+            .map(|d| format!("{}: {}", d.title, d.content))
+            .collect();
 
         let events = self
             .nlu
-            .extract(self.business.id, source_channel, text, &self.business.default_currency, &context_snippets)
+            .extract(
+                self.business.id,
+                source_channel,
+                text,
+                &self.business.default_currency,
+                &context_snippets,
+            )
             .await?;
 
         if events.is_empty() {
@@ -93,7 +110,13 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
 
         {
             let mut pending = self.pending.lock().await;
-            pending.insert(conversation_key.to_string(), PendingCommit { event_ids: ids, committed_at: Utc::now() });
+            pending.insert(
+                conversation_key.to_string(),
+                PendingCommit {
+                    event_ids: ids,
+                    committed_at: Utc::now(),
+                },
+            );
         }
 
         Ok(confirmation_reply(&lines, &self.business.language))
@@ -117,8 +140,18 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
     }
 
     pub async fn handle_report(&self, window: TimeWindow) -> Result<String, OrchestratorError> {
-        let report = build_report(self.store.as_ref(), self.business.id, window, &self.business.default_currency).await?;
-        Ok(render_report(&report, &self.business.name, &self.business.language))
+        let report = build_report(
+            self.store.as_ref(),
+            self.business.id,
+            window,
+            &self.business.default_currency,
+        )
+        .await?;
+        Ok(render_report(
+            &report,
+            &self.business.name,
+            &self.business.language,
+        ))
     }
 
     /// Entry point for webhook-delivered channels (Telegram, WhatsApp),
@@ -133,12 +166,17 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         provider_message_id: &str,
         text: &str,
     ) -> Result<Option<String>, OrchestratorError> {
-        let is_new = self.store.mark_message_processed(source_channel_tag(source_channel), provider_message_id).await?;
+        let is_new = self
+            .store
+            .mark_message_processed(source_channel_tag(source_channel), provider_message_id)
+            .await?;
         if !is_new {
             tracing::debug!(provider_message_id, "skipping redelivered message");
             return Ok(None);
         }
-        self.handle_message(conversation_key, source_channel, text).await.map(Some)
+        self.handle_message(conversation_key, source_channel, text)
+            .await
+            .map(Some)
     }
 }
 
@@ -155,8 +193,14 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
         BusinessEvent::Sale(s) => {
             let total = s.total();
             match language {
-                "id" => format!("Terjual: {} {} seharga {} = {}", s.quantity, s.item_name, s.unit_price, total),
-                _ => format!("Sold: {} {} at {} = {}", s.quantity, s.item_name, s.unit_price, total),
+                "id" => format!(
+                    "Terjual: {} {} seharga {} = {}",
+                    s.quantity, s.item_name, s.unit_price, total
+                ),
+                _ => format!(
+                    "Sold: {} {} at {} = {}",
+                    s.quantity, s.item_name, s.unit_price, total
+                ),
             }
         }
         BusinessEvent::Expense(e) => match language {

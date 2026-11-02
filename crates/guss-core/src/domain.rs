@@ -61,7 +61,8 @@ impl Sale {
     /// fractional quantities (e.g. 1.5 kg) never round-trip through a
     /// string/float conversion.
     pub fn total(&self) -> CurrencyAmount {
-        let total_minor = (self.quantity * self.unit_price.amount.minor_units as f64).round() as i64;
+        let total_minor =
+            (self.quantity * self.unit_price.amount.minor_units as f64).round() as i64;
         CurrencyAmount {
             amount: crate::money::Money::from_minor_units(total_minor),
             currency: self.unit_price.currency.clone(),

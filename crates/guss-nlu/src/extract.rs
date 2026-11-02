@@ -30,7 +30,10 @@ const STOPWORDS: &[&str] = &[
 /// calling `Nlu::extract`.
 pub fn extract_keywords(text: &str) -> Vec<String> {
     text.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
         .filter(|w| w.len() > 2 && !STOPWORDS.contains(&w.as_str()))
         .collect()
 }
@@ -79,15 +82,30 @@ impl<P: LlmProvider> Nlu<P> {
                     return Ok(dto
                         .events
                         .into_iter()
-                        .map(|e| to_business_event(e, business_id, source_channel, text, default_currency))
+                        .map(|e| {
+                            to_business_event(
+                                e,
+                                business_id,
+                                source_channel,
+                                text,
+                                default_currency,
+                            )
+                        })
                         .collect());
                 }
                 Err(parse_err) => {
                     if attempt == self.max_retries {
-                        return Err(NluError::Unparseable { raw: value.to_string() });
+                        return Err(NluError::Unparseable {
+                            raw: value.to_string(),
+                        });
                     }
                     tracing::warn!(attempt, %parse_err, "LLM output failed schema validation, retrying");
-                    user_prompt = retry_user_prompt(text, &value.to_string(), &parse_err.to_string(), &self.language);
+                    user_prompt = retry_user_prompt(
+                        text,
+                        &value.to_string(),
+                        &parse_err.to_string(),
+                        &self.language,
+                    );
                 }
             }
         }
@@ -105,47 +123,65 @@ fn to_business_event(
 ) -> BusinessEvent {
     let now = Utc::now();
     match event {
-        ExtractedEvent::Sale { item_name, quantity, unit_price_major, currency, category } => {
-            BusinessEvent::Sale(Sale {
-                id: Uuid::new_v4(),
-                business_id,
-                item_name,
-                quantity,
-                unit_price: CurrencyAmount::new(unit_price_major, currency.unwrap_or_else(|| default_currency.to_string())),
-                category,
-                occurred_at: now,
-                recurring: None,
-                source_channel,
-                raw_text: Some(raw_text.to_string()),
-            })
-        }
-        ExtractedEvent::Expense { description, amount_major, currency, category } => {
-            BusinessEvent::Expense(Expense {
-                id: Uuid::new_v4(),
-                business_id,
-                description,
-                amount: CurrencyAmount::new(amount_major, currency.unwrap_or_else(|| default_currency.to_string())),
-                category,
-                occurred_at: now,
-                recurring: None,
-                source_channel,
-                raw_text: Some(raw_text.to_string()),
-            })
-        }
-        ExtractedEvent::StockUpdate { item_name, delta, unit, unit_cost_major, reorder_threshold } => {
-            BusinessEvent::StockUpdate(StockUpdate {
-                id: Uuid::new_v4(),
-                business_id,
-                item_name,
-                delta,
-                unit,
-                unit_cost: unit_cost_major.map(|c| CurrencyAmount::new(c, default_currency.to_string())),
-                reorder_threshold,
-                occurred_at: now,
-                source_channel,
-                raw_text: Some(raw_text.to_string()),
-            })
-        }
+        ExtractedEvent::Sale {
+            item_name,
+            quantity,
+            unit_price_major,
+            currency,
+            category,
+        } => BusinessEvent::Sale(Sale {
+            id: Uuid::new_v4(),
+            business_id,
+            item_name,
+            quantity,
+            unit_price: CurrencyAmount::new(
+                unit_price_major,
+                currency.unwrap_or_else(|| default_currency.to_string()),
+            ),
+            category,
+            occurred_at: now,
+            recurring: None,
+            source_channel,
+            raw_text: Some(raw_text.to_string()),
+        }),
+        ExtractedEvent::Expense {
+            description,
+            amount_major,
+            currency,
+            category,
+        } => BusinessEvent::Expense(Expense {
+            id: Uuid::new_v4(),
+            business_id,
+            description,
+            amount: CurrencyAmount::new(
+                amount_major,
+                currency.unwrap_or_else(|| default_currency.to_string()),
+            ),
+            category,
+            occurred_at: now,
+            recurring: None,
+            source_channel,
+            raw_text: Some(raw_text.to_string()),
+        }),
+        ExtractedEvent::StockUpdate {
+            item_name,
+            delta,
+            unit,
+            unit_cost_major,
+            reorder_threshold,
+        } => BusinessEvent::StockUpdate(StockUpdate {
+            id: Uuid::new_v4(),
+            business_id,
+            item_name,
+            delta,
+            unit,
+            unit_cost: unit_cost_major
+                .map(|c| CurrencyAmount::new(c, default_currency.to_string())),
+            reorder_threshold,
+            occurred_at: now,
+            source_channel,
+            raw_text: Some(raw_text.to_string()),
+        }),
         ExtractedEvent::Note { text } => BusinessEvent::Note(Note {
             id: Uuid::new_v4(),
             business_id,
@@ -160,9 +196,9 @@ fn to_business_event(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use serde_json::{json, Value};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use serde_json::{Value, json};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     struct ScriptedProvider {
         responses: Mutex<Vec<Result<Value, LlmError>>>,
@@ -190,7 +226,13 @@ mod tests {
         let nlu = Nlu::new(provider, "en");
 
         let events = nlu
-            .extract(Uuid::new_v4(), SourceChannel::Cli, "sold 3 bags of rice at 500 each", "USD", &[])
+            .extract(
+                Uuid::new_v4(),
+                SourceChannel::Cli,
+                "sold 3 bags of rice at 500 each",
+                "USD",
+                &[],
+            )
             .await
             .unwrap();
 
@@ -217,7 +259,13 @@ mod tests {
         let nlu = Nlu::new(provider, "en");
 
         let events = nlu
-            .extract(Uuid::new_v4(), SourceChannel::Cli, "slow day today", "USD", &[])
+            .extract(
+                Uuid::new_v4(),
+                SourceChannel::Cli,
+                "slow day today",
+                "USD",
+                &[],
+            )
             .await
             .unwrap();
 

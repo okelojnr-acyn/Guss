@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use guss_core::domain::BusinessProfile;
@@ -34,8 +34,8 @@ impl Default for ScheduleConfig {
     fn default() -> Self {
         Self {
             daily_cron: "0 0 20 * * *".to_string(),   // every day at 20:00
-            weekly_cron: "0 0 9 * * Mon".to_string(),  // Monday 09:00
-            monthly_cron: "0 0 9 1 * *".to_string(),   // 1st of the month, 09:00
+            weekly_cron: "0 0 9 * * Mon".to_string(), // Monday 09:00
+            monthly_cron: "0 0 9 1 * *".to_string(),  // 1st of the month, 09:00
         }
     }
 }
@@ -49,13 +49,42 @@ pub async fn start<S: Store + Send + Sync + 'static>(
     sink: Arc<dyn ReportSink>,
     schedule: ScheduleConfig,
 ) -> Result<JobScheduler, SchedulerError> {
-    let scheduler = JobScheduler::new().await.map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
+    let scheduler = JobScheduler::new()
+        .await
+        .map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
 
-    add_job(&scheduler, &schedule.daily_cron, TimeWindow::Day, store.clone(), business.clone(), sink.clone()).await?;
-    add_job(&scheduler, &schedule.weekly_cron, TimeWindow::Week, store.clone(), business.clone(), sink.clone()).await?;
-    add_job(&scheduler, &schedule.monthly_cron, TimeWindow::Month, store, business, sink).await?;
+    add_job(
+        &scheduler,
+        &schedule.daily_cron,
+        TimeWindow::Day,
+        store.clone(),
+        business.clone(),
+        sink.clone(),
+    )
+    .await?;
+    add_job(
+        &scheduler,
+        &schedule.weekly_cron,
+        TimeWindow::Week,
+        store.clone(),
+        business.clone(),
+        sink.clone(),
+    )
+    .await?;
+    add_job(
+        &scheduler,
+        &schedule.monthly_cron,
+        TimeWindow::Month,
+        store,
+        business,
+        sink,
+    )
+    .await?;
 
-    scheduler.start().await.map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
+    scheduler
+        .start()
+        .await
+        .map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
     Ok(scheduler)
 }
 
@@ -79,7 +108,10 @@ async fn add_job<S: Store + Send + Sync + 'static>(
         let in_flight = in_flight.clone();
         Box::pin(async move {
             if in_flight.swap(true, Ordering::SeqCst) {
-                tracing::warn!(?window, "previous scheduled report run hasn't finished yet - skipping this tick");
+                tracing::warn!(
+                    ?window,
+                    "previous scheduled report run hasn't finished yet - skipping this tick"
+                );
                 return;
             }
             if let Err(e) = run_once(store.as_ref(), &business, &sink, window).await {
@@ -90,12 +122,22 @@ async fn add_job<S: Store + Send + Sync + 'static>(
     })
     .map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
 
-    scheduler.add(job).await.map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
+    scheduler
+        .add(job)
+        .await
+        .map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
     Ok(())
 }
 
-async fn run_once<S: Store>(store: &S, business: &BusinessProfile, sink: &Arc<dyn ReportSink>, window: TimeWindow) -> Result<(), String> {
-    let report = build_report(store, business.id, window, &business.default_currency).await.map_err(|e| e.to_string())?;
+async fn run_once<S: Store>(
+    store: &S,
+    business: &BusinessProfile,
+    sink: &Arc<dyn ReportSink>,
+    window: TimeWindow,
+) -> Result<(), String> {
+    let report = build_report(store, business.id, window, &business.default_currency)
+        .await
+        .map_err(|e| e.to_string())?;
     let text = render_report(&report, &business.name, &business.language);
     sink.send_report(text).await
 }
@@ -129,7 +171,9 @@ mod tests {
             language: "en".into(),
             timezone: "UTC".into(),
         };
-        let sink = Arc::new(RecordingSink { received: Mutex::new(Vec::new()) });
+        let sink = Arc::new(RecordingSink {
+            received: Mutex::new(Vec::new()),
+        });
 
         let mut scheduler = start(
             store,
@@ -148,7 +192,10 @@ mod tests {
         scheduler.shutdown().await.ok();
 
         let received = sink.received.lock().unwrap();
-        assert!(!received.is_empty(), "expected at least one scheduled report to fire within 2.5s");
+        assert!(
+            !received.is_empty(),
+            "expected at least one scheduled report to fire within 2.5s"
+        );
         assert!(received[0].contains("Acme Shop"));
     }
 }

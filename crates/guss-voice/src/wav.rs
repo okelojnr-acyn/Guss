@@ -10,7 +10,9 @@ use crate::VoiceError;
 /// build and run even without a C/C++ toolchain/CMake available.
 pub fn decode_wav16_mono_pcm(wav: &[u8]) -> Result<Vec<f32>, VoiceError> {
     if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
-        return Err(VoiceError::Transcription("input is not a valid WAV file".to_string()));
+        return Err(VoiceError::Transcription(
+            "input is not a valid WAV file".to_string(),
+        ));
     }
 
     let mut pos = 12;
@@ -23,8 +25,10 @@ pub fn decode_wav16_mono_pcm(wav: &[u8]) -> Result<Vec<f32>, VoiceError> {
             let data_end = (data_start + chunk_size).min(wav.len());
             let pcm = &wav[data_start..data_end];
             let samples = pcm
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
                 .collect();
             return Ok(samples);
         }
@@ -33,7 +37,9 @@ pub fn decode_wav16_mono_pcm(wav: &[u8]) -> Result<Vec<f32>, VoiceError> {
         pos = data_start + chunk_size + (chunk_size % 2);
     }
 
-    Err(VoiceError::Transcription("WAV file has no data chunk".to_string()))
+    Err(VoiceError::Transcription(
+        "WAV file has no data chunk".to_string(),
+    ))
 }
 
 #[cfg(test)]

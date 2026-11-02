@@ -1,5 +1,5 @@
-use figment::providers::{Env, Format, Toml};
 use figment::Figment;
+use figment::providers::{Env, Format, Toml};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -58,6 +58,10 @@ fn default_store_url() -> String {
     "sqlite://guss.db".to_string()
 }
 
+// Fields are only read from the `local-whisper`-gated branch of
+// build_voice_support in main.rs - unread (and this whole struct unused
+// on AppConfig) when that feature is off.
+#[cfg_attr(not(feature = "local-whisper"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct SttConfig {
     /// Path to a whisper.cpp GGML/GGUF model file, downloaded separately
@@ -183,6 +187,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub store: StoreConfig,
     #[serde(default)]
+    #[cfg_attr(not(feature = "local-whisper"), allow(dead_code))]
     pub stt: SttConfig,
     #[serde(default)]
     pub tts: TtsConfig,
