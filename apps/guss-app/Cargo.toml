@@ -9,6 +9,10 @@ edition = "2024"
 # local-whisper for offline/free speech-to-text - see
 # docs/setup-elevenlabs-piper.md.
 local-whisper = ["guss-voice/local-whisper"]
+# Off by default - adds PostgresStore as a storage option (picked at
+# runtime from GUSS_STORE__URL's scheme via guss_store::AnyStore). Plain
+# SQLite needs no feature flag at all. See docs/ARCHITECTURE.md.
+postgres = ["guss-store/postgres"]
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

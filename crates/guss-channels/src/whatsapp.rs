@@ -4,7 +4,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{body::Bytes, Router};
+use axum::{Router, body::Bytes};
 use guss_core::domain::SourceChannel;
 use guss_core::store::Store;
 use guss_llm::LlmProvider;
@@ -59,7 +59,12 @@ where
     S: Store + Send + Sync + 'static,
 {
     let listen_addr = config.listen_addr.clone();
-    let state = Arc::new(AppState { orchestrator, voice, config, semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_MESSAGES)) });
+    let state = Arc::new(AppState {
+        orchestrator,
+        voice,
+        config,
+        semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_MESSAGES)),
+    });
 
     let app = Router::new()
         .route("/webhook", get(verify_webhook::<P, S>))
@@ -82,9 +87,14 @@ struct VerifyQuery {
     challenge: Option<String>,
 }
 
-async fn verify_webhook<P: LlmProvider, S: Store>(State(state): State<Arc<AppState<P, S>>>, Query(q): Query<VerifyQuery>) -> impl IntoResponse {
+async fn verify_webhook<P: LlmProvider, S: Store>(
+    State(state): State<Arc<AppState<P, S>>>,
+    Query(q): Query<VerifyQuery>,
+) -> impl IntoResponse {
     match (q.mode.as_deref(), &q.verify_token, q.challenge) {
-        (Some("subscribe"), Some(token), Some(challenge)) if *token == state.config.verify_token => {
+        (Some("subscribe"), Some(token), Some(challenge))
+            if *token == state.config.verify_token =>
+        {
             (StatusCode::OK, challenge).into_response()
         }
         _ => (StatusCode::FORBIDDEN, "verify token mismatch").into_response(),
@@ -92,21 +102,35 @@ async fn verify_webhook<P: LlmProvider, S: Store>(State(state): State<Arc<AppSta
 }
 
 fn signature_valid(app_secret: &str, signature_header: Option<&str>, raw_body: &[u8]) -> bool {
-    let Some(header) = signature_header else { return false };
-    let Some(hex_sig) = header.strip_prefix("sha256=") else { return false };
-    let Ok(expected) = hex::decode(hex_sig) else { return false };
+    let Some(header) = signature_header else {
+        return false;
+    };
+    let Some(hex_sig) = header.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Ok(expected) = hex::decode(hex_sig) else {
+        return false;
+    };
 
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(app_secret.as_bytes()) else { return false };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(app_secret.as_bytes()) else {
+        return false;
+    };
     mac.update(raw_body);
     mac.verify_slice(&expected).is_ok()
 }
 
-async fn handle_webhook<P, S>(State(state): State<Arc<AppState<P, S>>>, headers: HeaderMap, raw_body: Bytes) -> impl IntoResponse
+async fn handle_webhook<P, S>(
+    State(state): State<Arc<AppState<P, S>>>,
+    headers: HeaderMap,
+    raw_body: Bytes,
+) -> impl IntoResponse
 where
     P: LlmProvider + Send + Sync + 'static,
     S: Store + Send + Sync + 'static,
 {
-    let signature = headers.get("X-Hub-Signature-256").and_then(|v| v.to_str().ok());
+    let signature = headers
+        .get("X-Hub-Signature-256")
+        .and_then(|v| v.to_str().ok());
     if !signature_valid(&state.config.app_secret, signature, &raw_body) {
         tracing::warn!("rejected WhatsApp webhook POST with invalid/missing signature");
         return StatusCode::UNAUTHORIZED;
@@ -122,7 +146,12 @@ where
 
     let mut tasks = JoinSet::new();
     for message in payload.into_messages() {
-        let permit = state.semaphore.clone().acquire_owned().await.expect("semaphore never closed");
+        let permit = state
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore never closed");
         let state = state.clone();
         tasks.spawn(async move {
             let _permit = permit;
@@ -187,7 +216,10 @@ impl WebhookPayload {
     }
 }
 
-async fn handle_message<P, S>(state: &AppState<P, S>, msg: InboundMessage) -> Result<(), WhatsAppError>
+async fn handle_message<P, S>(
+    state: &AppState<P, S>,
+    msg: InboundMessage,
+) -> Result<(), WhatsAppError>
 where
     P: LlmProvider,
     S: Store,
@@ -200,10 +232,24 @@ where
             };
             match transcribe_media(state, &audio.id).await {
                 Ok(transcript) => transcript,
-                Err(e) => return send_text(state, &msg.from, &format!("Couldn't understand that voice note: {e}")).await,
+                Err(e) => {
+                    return send_text(
+                        state,
+                        &msg.from,
+                        &format!("Couldn't understand that voice note: {e}"),
+                    )
+                    .await;
+                }
             }
         }
-        other => return send_text(state, &msg.from, &format!("I can only read text or voice notes right now (got \"{other}\").")).await,
+        other => {
+            return send_text(
+                state,
+                &msg.from,
+                &format!("I can only read text or voice notes right now (got \"{other}\")."),
+            )
+            .await;
+        }
     };
 
     let reply = state
@@ -232,9 +278,14 @@ where
     Ok(())
 }
 
-async fn transcribe_media<P: LlmProvider, S: Store>(state: &AppState<P, S>, media_id: &str) -> Result<String, WhatsAppError> {
+async fn transcribe_media<P: LlmProvider, S: Store>(
+    state: &AppState<P, S>,
+    media_id: &str,
+) -> Result<String, WhatsAppError> {
     let Some(stt) = &state.voice.stt else {
-        return Err(WhatsAppError::Api("no speech-to-text provider is configured".to_string()));
+        return Err(WhatsAppError::Api(
+            "no speech-to-text provider is configured".to_string(),
+        ));
     };
 
     let client = reqwest::Client::new();
@@ -264,18 +315,37 @@ async fn transcribe_media<P: LlmProvider, S: Store>(state: &AppState<P, S>, medi
         .await
         .map_err(|e| WhatsAppError::Api(e.to_string()))?;
 
-    let wav = guss_voice::convert::to_wav16k_mono(&bytes).await.map_err(|e| WhatsAppError::Api(e.to_string()))?;
-    stt.transcribe(&wav).await.map_err(|e| WhatsAppError::Api(e.to_string()))
+    let wav = guss_voice::convert::to_wav16k_mono(&bytes)
+        .await
+        .map_err(|e| WhatsAppError::Api(e.to_string()))?;
+    stt.transcribe(&wav)
+        .await
+        .map_err(|e| WhatsAppError::Api(e.to_string()))
 }
 
-async fn send_text<P: LlmProvider, S: Store>(state: &AppState<P, S>, to: &str, body: &str) -> Result<(), WhatsAppError> {
-    send_text_raw(&state.config.access_token, &state.config.phone_number_id, to, body).await
+async fn send_text<P: LlmProvider, S: Store>(
+    state: &AppState<P, S>,
+    to: &str,
+    body: &str,
+) -> Result<(), WhatsAppError> {
+    send_text_raw(
+        &state.config.access_token,
+        &state.config.phone_number_id,
+        to,
+        body,
+    )
+    .await
 }
 
 /// The actual Graph API call, factored out of `send_text` so the
 /// scheduler's `WhatsAppReportSink` (which has no `AppState`, just raw
 /// credentials) can reuse it for proactive EOD/weekly/monthly pushes.
-async fn send_text_raw(access_token: &str, phone_number_id: &str, to: &str, body: &str) -> Result<(), WhatsAppError> {
+async fn send_text_raw(
+    access_token: &str,
+    phone_number_id: &str,
+    to: &str,
+    body: &str,
+) -> Result<(), WhatsAppError> {
     let client = reqwest::Client::new();
     let url = format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/messages");
     let response = client
@@ -294,7 +364,9 @@ async fn send_text_raw(access_token: &str, phone_number_id: &str, to: &str, body
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(WhatsAppError::Api(format!("send message HTTP {status}: {text}")));
+        return Err(WhatsAppError::Api(format!(
+            "send message HTTP {status}: {text}"
+        )));
     }
     Ok(())
 }
@@ -309,19 +381,33 @@ pub struct WhatsAppReportSink {
 }
 
 impl WhatsAppReportSink {
-    pub fn new(access_token: impl Into<String>, phone_number_id: impl Into<String>, to: impl Into<String>) -> Self {
-        Self { access_token: access_token.into(), phone_number_id: phone_number_id.into(), to: to.into() }
+    pub fn new(
+        access_token: impl Into<String>,
+        phone_number_id: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        Self {
+            access_token: access_token.into(),
+            phone_number_id: phone_number_id.into(),
+            to: to.into(),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl guss_scheduler::ReportSink for WhatsAppReportSink {
     async fn send_report(&self, text: String) -> Result<(), String> {
-        send_text_raw(&self.access_token, &self.phone_number_id, &self.to, &text).await.map_err(|e| e.to_string())
+        send_text_raw(&self.access_token, &self.phone_number_id, &self.to, &text)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
-async fn send_audio<P: LlmProvider, S: Store>(state: &AppState<P, S>, to: &str, clip: guss_voice::AudioClip) -> Result<(), WhatsAppError> {
+async fn send_audio<P: LlmProvider, S: Store>(
+    state: &AppState<P, S>,
+    to: &str,
+    clip: guss_voice::AudioClip,
+) -> Result<(), WhatsAppError> {
     let client = reqwest::Client::new();
     let mime = match clip.format {
         guss_voice::AudioFormat::Wav => "audio/wav",
@@ -332,7 +418,9 @@ async fn send_audio<P: LlmProvider, S: Store>(state: &AppState<P, S>, to: &str, 
         "https://graph.facebook.com/{GRAPH_API_VERSION}/{}/media",
         state.config.phone_number_id
     );
-    let part = reqwest::multipart::Part::bytes(clip.bytes).mime_str(mime).map_err(|e| WhatsAppError::Api(e.to_string()))?;
+    let part = reqwest::multipart::Part::bytes(clip.bytes)
+        .mime_str(mime)
+        .map_err(|e| WhatsAppError::Api(e.to_string()))?;
     let form = reqwest::multipart::Form::new()
         .text("messaging_product", "whatsapp")
         .text("type", mime)
@@ -374,7 +462,9 @@ async fn send_audio<P: LlmProvider, S: Store>(state: &AppState<P, S>, to: &str, 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(WhatsAppError::Api(format!("send audio HTTP {status}: {text}")));
+        return Err(WhatsAppError::Api(format!(
+            "send audio HTTP {status}: {text}"
+        )));
     }
     Ok(())
 }
@@ -445,6 +535,9 @@ mod tests {
         let messages = payload.into_messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "15550001234");
-        assert_eq!(messages[0].text.as_ref().unwrap().body, "sold 3 bags of rice");
+        assert_eq!(
+            messages[0].text.as_ref().unwrap().body,
+            "sold 3 bags of rice"
+        );
     }
 }

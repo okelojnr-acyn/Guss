@@ -17,14 +17,21 @@ pub struct ElevenLabsTts {
 
 impl ElevenLabsTts {
     pub fn new(api_key: impl Into<String>, voice_id: impl Into<String>) -> Self {
-        Self { api_key: api_key.into(), voice_id: voice_id.into(), client: reqwest::Client::new() }
+        Self {
+            api_key: api_key.into(),
+            voice_id: voice_id.into(),
+            client: reqwest::Client::new(),
+        }
     }
 }
 
 #[async_trait]
 impl Tts for ElevenLabsTts {
     async fn synthesize(&self, text: &str) -> Result<AudioClip, VoiceError> {
-        let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{}", self.voice_id);
+        let url = format!(
+            "https://api.elevenlabs.io/v1/text-to-speech/{}",
+            self.voice_id
+        );
 
         let response = self
             .client
@@ -41,11 +48,19 @@ impl Tts for ElevenLabsTts {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(VoiceError::Http(format!("ElevenLabs returned HTTP {status}: {body}")));
+            return Err(VoiceError::Http(format!(
+                "ElevenLabs returned HTTP {status}: {body}"
+            )));
         }
 
-        let bytes = response.bytes().await.map_err(|e| VoiceError::Http(e.to_string()))?;
-        Ok(AudioClip { bytes: bytes.to_vec(), format: AudioFormat::Mp3 })
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| VoiceError::Http(e.to_string()))?;
+        Ok(AudioClip {
+            bytes: bytes.to_vec(),
+            format: AudioFormat::Mp3,
+        })
     }
 }
 
@@ -61,7 +76,10 @@ pub struct PiperTts {
 
 impl PiperTts {
     pub fn new(piper_binary: impl Into<String>, voice_model_path: impl Into<String>) -> Self {
-        Self { piper_binary: piper_binary.into(), voice_model_path: voice_model_path.into() }
+        Self {
+            piper_binary: piper_binary.into(),
+            voice_model_path: voice_model_path.into(),
+        }
     }
 }
 
@@ -105,7 +123,10 @@ impl Tts for PiperTts {
         // sample rate; wrap it in a minimal WAV header so downstream
         // consumers (channels sending a voice note) get a standard file.
         let wav_bytes = wrap_pcm_as_wav(&output.stdout, 22050);
-        Ok(AudioClip { bytes: wav_bytes, format: AudioFormat::Wav })
+        Ok(AudioClip {
+            bytes: wav_bytes,
+            format: AudioFormat::Wav,
+        })
     }
 }
 

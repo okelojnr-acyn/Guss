@@ -70,6 +70,9 @@ pub trait Store: Send + Sync {
     /// Idempotency guard: records a provider message id as seen, returning
     /// `true` if it was newly recorded (process it) or `false` if it had
     /// already been seen (a webhook redelivery - skip it).
-    async fn mark_message_processed(&self, source: &str, provider_message_id: &str)
-        -> Result<bool, StoreError>;
+    async fn mark_message_processed(
+        &self,
+        source: &str,
+        provider_message_id: &str,
+    ) -> Result<bool, StoreError>;
 }

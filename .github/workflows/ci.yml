@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, test (sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --no-default-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --no-default-features
+
+  postgres-integration:
+    name: Postgres store (integration)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: guss
+          POSTGRES_PASSWORD: guss
+          POSTGRES_DB: guss
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U guss"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # guss-store's Postgres implementation (crates/guss-store/src/postgres.rs)
+      # is only built/tested here - the default `test` job above deliberately
+      # stays on --no-default-features (sqlite) so contributors without a
+      # Postgres instance don't need one just to run `cargo test`. "postgres"
+      # is additive to the default "sqlite" feature, not a replacement -
+      # AnyStore's Sqlite variant (crates/guss-store/src/any.rs) is never
+      # feature-gated, so sqlite must stay compiled in either way.
+      - name: Run Postgres-backed Store tests
+        env:
+          GUSS_TEST_POSTGRES_URL: postgres://guss:guss@localhost:5432/guss
+        run: cargo test -p guss-store --features postgres -- --ignored
+
+  whisper-e2e:
+    name: Local Whisper (real audio sample)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # whisper-rs-sys compiles whisper.cpp (C++) via CMake as part of the
+      # Rust build - this is the real, unavoidable prerequisite documented in
+      # docs/setup-elevenlabs-piper.md, not something Guss can paper over.
+      - name: Install build toolchain + audio tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake espeak-ng ffmpeg
+
+      - name: Download a Whisper model
+        run: |
+          mkdir -p models
+          curl -L -o models/ggml-tiny.en.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+
+      # A real synthesized speech sample, not a tone or silence - this is
+      # what makes crates/guss-voice/tests/whisper_e2e.rs an actual
+      # end-to-end check of the real whisper-rs API, not just a compile check.
+      - name: Synthesize a speech sample
+        run: espeak-ng -s 150 -w sample.wav "the quick brown fox jumps over the lazy dog"
+
+      - name: Run the Whisper end-to-end test
+        env:
+          GUSS_TEST_WHISPER_MODEL_PATH: ${{ github.workspace }}/models/ggml-tiny.en.bin
+          GUSS_TEST_WHISPER_WAV_PATH: ${{ github.workspace }}/sample.wav
+        run: cargo test -p guss-voice --features local-whisper -- --ignored whisper_transcribes_real_speech

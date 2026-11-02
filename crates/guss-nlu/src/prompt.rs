@@ -34,7 +34,12 @@ pub fn system_prompt(language: &str, context_snippets: &[String]) -> String {
 /// Re-prompt used when the model's previous response failed to parse
 /// against the schema - feeds back its own bad output and the parse
 /// error so it can self-correct, rather than retrying blind.
-pub fn retry_user_prompt(original_text: &str, raw_bad_output: &str, parse_error: &str, language: &str) -> String {
+pub fn retry_user_prompt(
+    original_text: &str,
+    raw_bad_output: &str,
+    parse_error: &str,
+    language: &str,
+) -> String {
     match language {
         "id" => format!(
             "Pesan asli: \"{original_text}\"\n\n\

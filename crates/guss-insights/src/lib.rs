@@ -1,5 +1,5 @@
 pub mod aggregate;
 pub mod render;
 
-pub use aggregate::{build_report, compute_report, ItemStat, MrrLine, ReportData};
+pub use aggregate::{ItemStat, MrrLine, ReportData, build_report, compute_report};
 pub use render::render_report;

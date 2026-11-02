@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use guss_core::domain::{BusinessEvent, BusinessProfile, Document, RecurrenceInterval, SourceChannel};
-use guss_core::store::{Store, StoreError, StockLevel, TimeWindow};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use guss_core::domain::{BusinessEvent, BusinessProfile, Document};
+use guss_core::store::{StockLevel, Store, StoreError, TimeWindow};
 use sqlx::Row;
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use uuid::Uuid;
+
+use crate::event_columns::columns_for;
 
 pub struct SqliteStore {
     pool: SqlitePool,
@@ -23,136 +25,16 @@ impl SqliteStore {
             .connect(url)
             .await
             .map_err(db_err)?;
-        sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| StoreError::Database(e.to_string()))?;
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
         Ok(Self { pool })
     }
 
     #[cfg(test)]
     pub async fn connect_in_memory() -> Result<Self, StoreError> {
         Self::connect("sqlite::memory:").await
-    }
-}
-
-fn source_channel_str(c: SourceChannel) -> &'static str {
-    match c {
-        SourceChannel::Cli => "cli",
-        SourceChannel::Telegram => "telegram",
-        SourceChannel::WhatsApp => "whatsapp",
-    }
-}
-
-fn recurrence_interval_str(i: RecurrenceInterval) -> &'static str {
-    match i {
-        RecurrenceInterval::Daily => "daily",
-        RecurrenceInterval::Weekly => "weekly",
-        RecurrenceInterval::Monthly => "monthly",
-    }
-}
-
-struct EventColumns {
-    id: String,
-    business_id: String,
-    kind: &'static str,
-    occurred_at: String,
-    item_name: Option<String>,
-    quantity: Option<f64>,
-    delta: Option<f64>,
-    unit: Option<String>,
-    amount_minor: Option<i64>,
-    currency: Option<String>,
-    category: Option<String>,
-    description: Option<String>,
-    reorder_threshold: Option<f64>,
-    recurring_interval: Option<&'static str>,
-    recurring_label: Option<String>,
-    source_channel: &'static str,
-    raw_text: Option<String>,
-    payload: String,
-}
-
-fn columns_for(event: &BusinessEvent) -> EventColumns {
-    let payload = serde_json::to_string(event).expect("BusinessEvent always serializes");
-    match event {
-        BusinessEvent::Sale(s) => EventColumns {
-            id: s.id.to_string(),
-            business_id: s.business_id.to_string(),
-            kind: "sale",
-            occurred_at: s.occurred_at.to_rfc3339(),
-            item_name: Some(s.item_name.clone()),
-            quantity: Some(s.quantity),
-            delta: None,
-            unit: None,
-            amount_minor: Some(s.unit_price.amount.minor_units),
-            currency: Some(s.unit_price.currency.clone()),
-            category: s.category.clone(),
-            description: None,
-            reorder_threshold: None,
-            recurring_interval: s.recurring.as_ref().map(|r| recurrence_interval_str(r.interval)),
-            recurring_label: s.recurring.as_ref().map(|r| r.label.clone()),
-            source_channel: source_channel_str(s.source_channel),
-            raw_text: s.raw_text.clone(),
-            payload,
-        },
-        BusinessEvent::Expense(e) => EventColumns {
-            id: e.id.to_string(),
-            business_id: e.business_id.to_string(),
-            kind: "expense",
-            occurred_at: e.occurred_at.to_rfc3339(),
-            item_name: None,
-            quantity: None,
-            delta: None,
-            unit: None,
-            amount_minor: Some(e.amount.amount.minor_units),
-            currency: Some(e.amount.currency.clone()),
-            category: e.category.clone(),
-            description: Some(e.description.clone()),
-            reorder_threshold: None,
-            recurring_interval: e.recurring.as_ref().map(|r| recurrence_interval_str(r.interval)),
-            recurring_label: e.recurring.as_ref().map(|r| r.label.clone()),
-            source_channel: source_channel_str(e.source_channel),
-            raw_text: e.raw_text.clone(),
-            payload,
-        },
-        BusinessEvent::StockUpdate(su) => EventColumns {
-            id: su.id.to_string(),
-            business_id: su.business_id.to_string(),
-            kind: "stock_update",
-            occurred_at: su.occurred_at.to_rfc3339(),
-            item_name: Some(su.item_name.clone()),
-            quantity: None,
-            delta: Some(su.delta),
-            unit: su.unit.clone(),
-            amount_minor: su.unit_cost.as_ref().map(|c| c.amount.minor_units),
-            currency: su.unit_cost.as_ref().map(|c| c.currency.clone()),
-            category: None,
-            description: None,
-            reorder_threshold: su.reorder_threshold,
-            recurring_interval: None,
-            recurring_label: None,
-            source_channel: source_channel_str(su.source_channel),
-            raw_text: su.raw_text.clone(),
-            payload,
-        },
-        BusinessEvent::Note(n) => EventColumns {
-            id: n.id.to_string(),
-            business_id: n.business_id.to_string(),
-            kind: "note",
-            occurred_at: n.occurred_at.to_rfc3339(),
-            item_name: None,
-            quantity: None,
-            delta: None,
-            unit: None,
-            amount_minor: None,
-            currency: None,
-            category: None,
-            description: Some(n.text.clone()),
-            reorder_threshold: None,
-            recurring_interval: None,
-            recurring_label: None,
-            source_channel: source_channel_str(n.source_channel),
-            raw_text: None,
-            payload,
-        },
     }
 }
 
@@ -349,7 +231,8 @@ impl Store for SqliteStore {
                 let created_at: String = row.get("created_at");
                 Ok(Document {
                     id: Uuid::parse_str(&id).map_err(|e| StoreError::Database(e.to_string()))?,
-                    business_id: Uuid::parse_str(&business_id).map_err(|e| StoreError::Database(e.to_string()))?,
+                    business_id: Uuid::parse_str(&business_id)
+                        .map_err(|e| StoreError::Database(e.to_string()))?,
                     title: row.get("title"),
                     content: row.get("content"),
                     created_at: DateTime::parse_from_rfc3339(&created_at)
@@ -384,10 +267,12 @@ impl Store for SqliteStore {
     }
 
     async fn load_business_profile(&self) -> Result<Option<BusinessProfile>, StoreError> {
-        let row = sqlx::query("SELECT id, name, default_currency, language, timezone FROM business_profile LIMIT 1")
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(db_err)?;
+        let row = sqlx::query(
+            "SELECT id, name, default_currency, language, timezone FROM business_profile LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
 
         match row {
             None => Ok(None),
@@ -425,7 +310,7 @@ impl Store for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use guss_core::domain::{BusinessEvent, Sale, StockUpdate};
+    use guss_core::domain::{BusinessEvent, Sale, SourceChannel, StockUpdate};
     use guss_core::money::CurrencyAmount;
 
     fn sale(business_id: Uuid, item: &str, qty: f64, price: f64) -> BusinessEvent {
@@ -463,9 +348,18 @@ mod tests {
         let store = SqliteStore::connect_in_memory().await.unwrap();
         let business_id = Uuid::new_v4();
 
-        store.save_event(&restock(business_id, "rice", 20.0, Some(5.0))).await.unwrap();
-        store.save_event(&sale(business_id, "rice", 3.0, 500.0)).await.unwrap();
-        store.save_event(&sale(business_id, "rice", 2.0, 500.0)).await.unwrap();
+        store
+            .save_event(&restock(business_id, "rice", 20.0, Some(5.0)))
+            .await
+            .unwrap();
+        store
+            .save_event(&sale(business_id, "rice", 3.0, 500.0))
+            .await
+            .unwrap();
+        store
+            .save_event(&sale(business_id, "rice", 2.0, 500.0))
+            .await
+            .unwrap();
 
         let stock = store.current_stock(business_id, "rice").await.unwrap();
         assert_eq!(stock, 15.0);
@@ -476,9 +370,18 @@ mod tests {
         let store = SqliteStore::connect_in_memory().await.unwrap();
         let business_id = Uuid::new_v4();
 
-        store.save_event(&restock(business_id, "rice", 10.0, Some(5.0))).await.unwrap();
-        store.save_event(&sale(business_id, "rice", 6.0, 500.0)).await.unwrap();
-        store.save_event(&restock(business_id, "soap", 50.0, Some(5.0))).await.unwrap();
+        store
+            .save_event(&restock(business_id, "rice", 10.0, Some(5.0)))
+            .await
+            .unwrap();
+        store
+            .save_event(&sale(business_id, "rice", 6.0, 500.0))
+            .await
+            .unwrap();
+        store
+            .save_event(&restock(business_id, "soap", 50.0, Some(5.0)))
+            .await
+            .unwrap();
 
         let low = store.low_stock_items(business_id).await.unwrap();
         assert_eq!(low.len(), 1);
@@ -493,7 +396,10 @@ mod tests {
         let event = sale(business_id, "soap", 1.0, 1200.0);
 
         store.save_event(&event).await.unwrap();
-        let events = store.list_events(business_id, TimeWindow::Day).await.unwrap();
+        let events = store
+            .list_events(business_id, TimeWindow::Day)
+            .await
+            .unwrap();
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], event);
@@ -530,7 +436,10 @@ mod tests {
         let event_id = event.id();
 
         store.save_event(&event).await.unwrap();
-        assert_eq!(store.current_stock(business_id, "rice").await.unwrap(), 10.0);
+        assert_eq!(
+            store.current_stock(business_id, "rice").await.unwrap(),
+            10.0
+        );
 
         store.delete_event(event_id).await.unwrap();
         assert_eq!(store.current_stock(business_id, "rice").await.unwrap(), 0.0);
@@ -539,8 +448,14 @@ mod tests {
     #[tokio::test]
     async fn mark_message_processed_detects_redelivery() {
         let store = SqliteStore::connect_in_memory().await.unwrap();
-        let first = store.mark_message_processed("telegram", "msg-1").await.unwrap();
-        let second = store.mark_message_processed("telegram", "msg-1").await.unwrap();
+        let first = store
+            .mark_message_processed("telegram", "msg-1")
+            .await
+            .unwrap();
+        let second = store
+            .mark_message_processed("telegram", "msg-1")
+            .await
+            .unwrap();
         assert!(first, "first delivery should be newly recorded");
         assert!(!second, "redelivery should be detected as already seen");
     }

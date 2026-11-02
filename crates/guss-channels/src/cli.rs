@@ -73,14 +73,18 @@ pub async fn run<P: LlmProvider, S: Store>(
             match transcribe_file(voice, path.trim()).await {
                 Ok(transcript) => {
                     writeln!(output, "(heard: {transcript})")?;
-                    orchestrator.handle_message(CLI_CONVERSATION_KEY, SourceChannel::Cli, &transcript).await
+                    orchestrator
+                        .handle_message(CLI_CONVERSATION_KEY, SourceChannel::Cli, &transcript)
+                        .await
                 }
-                Err(e) => Err(e.into()),
+                Err(e) => Err(e),
             }
         } else if let Some(rest) = text.to_lowercase().strip_prefix("report") {
             orchestrator.handle_report(parse_report_window(rest)).await
         } else {
-            orchestrator.handle_message(CLI_CONVERSATION_KEY, SourceChannel::Cli, text).await
+            orchestrator
+                .handle_message(CLI_CONVERSATION_KEY, SourceChannel::Cli, text)
+                .await
         };
 
         match reply {
@@ -97,15 +101,20 @@ pub async fn run<P: LlmProvider, S: Store>(
     Ok(())
 }
 
-async fn transcribe_file(voice: &VoiceSupport, path: &str) -> Result<String, crate::orchestrator::OrchestratorError> {
+async fn transcribe_file(
+    voice: &VoiceSupport,
+    path: &str,
+) -> Result<String, crate::orchestrator::OrchestratorError> {
     let Some(stt) = &voice.stt else {
         return Err(crate::orchestrator::OrchestratorError::VoiceNotConfigured(
             "no speech-to-text provider is configured (set GUSS_STT__* in .env)".to_string(),
         ));
     };
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| crate::orchestrator::OrchestratorError::VoiceNotConfigured(format!("couldn't read {path}: {e}")))?;
+    let bytes = tokio::fs::read(path).await.map_err(|e| {
+        crate::orchestrator::OrchestratorError::VoiceNotConfigured(format!(
+            "couldn't read {path}: {e}"
+        ))
+    })?;
     let wav = guss_voice::convert::to_wav16k_mono(&bytes)
         .await
         .map_err(|e| crate::orchestrator::OrchestratorError::VoiceNotConfigured(e.to_string()))?;
@@ -122,10 +131,10 @@ mod tests {
     use guss_llm::{JsonCompletionRequest, LlmError};
     use guss_nlu::Nlu;
     use guss_store::SqliteStore;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::io::Cursor;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
     /// A canned LLM: first call extracts a sale, every call after that
@@ -163,18 +172,34 @@ mod tests {
             language: "en".into(),
             timezone: "UTC".into(),
         };
-        let nlu = Nlu::new(CannedProvider { calls: AtomicUsize::new(0) }, "en");
+        let nlu = Nlu::new(
+            CannedProvider {
+                calls: AtomicUsize::new(0),
+            },
+            "en",
+        );
         let orchestrator = Orchestrator::new(nlu, store, business);
 
         let input = Cursor::new(b"sold 3 bags of rice at 500 each\nreport\nexit\n".to_vec());
         let mut output = Vec::new();
-        run(&orchestrator, &VoiceSupport::default(), input, &mut output).await.unwrap();
+        run(&orchestrator, &VoiceSupport::default(), input, &mut output)
+            .await
+            .unwrap();
 
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("Sold: 3 rice"), "expected sale confirmation, got:\n{text}");
+        assert!(
+            text.contains("Sold: 3 rice"),
+            "expected sale confirmation, got:\n{text}"
+        );
         assert!(text.contains("Reply \"no\" within 5 minutes to undo"));
-        assert!(text.contains("Best sellers by quantity: rice"), "expected report to mention rice, got:\n{text}");
-        assert!(text.contains("1500.00 USD"), "expected report revenue total, got:\n{text}");
+        assert!(
+            text.contains("Best sellers by quantity: rice"),
+            "expected report to mention rice, got:\n{text}"
+        );
+        assert!(
+            text.contains("1500.00 USD"),
+            "expected report revenue total, got:\n{text}"
+        );
     }
 
     #[tokio::test]
@@ -187,15 +212,25 @@ mod tests {
             language: "en".into(),
             timezone: "UTC".into(),
         };
-        let nlu = Nlu::new(CannedProvider { calls: AtomicUsize::new(0) }, "en");
+        let nlu = Nlu::new(
+            CannedProvider {
+                calls: AtomicUsize::new(0),
+            },
+            "en",
+        );
         let orchestrator = Orchestrator::new(nlu, store, business);
 
         let input = Cursor::new(b"sold 3 bags of rice at 500 each\nno\nreport\nexit\n".to_vec());
         let mut output = Vec::new();
-        run(&orchestrator, &VoiceSupport::default(), input, &mut output).await.unwrap();
+        run(&orchestrator, &VoiceSupport::default(), input, &mut output)
+            .await
+            .unwrap();
 
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("Undone."));
-        assert!(!text.contains("Best sellers by quantity"), "report should have nothing to show after undo, got:\n{text}");
+        assert!(
+            !text.contains("Best sellers by quantity"),
+            "report should have nothing to show after undo, got:\n{text}"
+        );
     }
 }

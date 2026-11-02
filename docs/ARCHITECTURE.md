@@ -4,17 +4,31 @@ Guss is a Cargo workspace. Each crate has one job and depends only on
 the crates below it - nothing cyclic, nothing that needs to know about
 the UI layer to do its own job.
 
+```mermaid
+graph TD
+    app["guss (apps/guss-app)<br/>binary: config loading, wiring, guss init"]
+    channels["guss-channels<br/>CLI / Telegram / WhatsApp adapters, Orchestrator"]
+    nlu["guss-nlu<br/>text -> BusinessEvent extraction"]
+    llm["guss-llm<br/>one LlmProvider impl (OpenAI-compatible)"]
+    insights["guss-insights<br/>aggregation + bilingual report rendering"]
+    voice["guss-voice<br/>Stt/Tts traits, Whisper/Piper/ElevenLabs/ffmpeg"]
+    scheduler["guss-scheduler<br/>EOD/weekly/monthly proactive report pushes"]
+    store["guss-store<br/>Store trait impls: SqliteStore, PostgresStore"]
+    core["guss-core<br/>domain model (Sale/Expense/StockUpdate/Note), Store trait"]
+
+    app --> channels
+    app --> scheduler
+    app --> store
+    channels --> nlu
+    channels --> insights
+    channels --> voice
+    nlu --> llm
+    store --> core
 ```
-guss (apps/guss-app)        <- binary: config loading, wiring, `guss init`
-  |-- guss-channels          <- CLI / Telegram / WhatsApp adapters, Orchestrator
-  |     |-- guss-nlu         <- text -> BusinessEvent extraction
-  |     |     |-- guss-llm   <- one LlmProvider impl (OpenAI-compatible)
-  |     |-- guss-insights    <- aggregation + bilingual report rendering
-  |     |-- guss-voice       <- Stt/Tts traits, Whisper/Piper/ElevenLabs/ffmpeg
-  |-- guss-scheduler          <- EOD/weekly/monthly proactive report pushes
-  |-- guss-store              <- Store trait impl (SQLite)
-        |-- guss-core         <- domain model (Sale/Expense/StockUpdate/Note), Store trait
-```
+
+Storage is the one place with two implementations behind one trait -
+see [Storage](#storage-guss-store) below for how `guss-app` picks between
+them at runtime.
 
 ## Domain model (`guss-core`)
 
@@ -37,23 +51,50 @@ running Guss serves one business.
 
 ## Storage (`guss-store`)
 
-`Store` is a trait; `SqliteStore` is the only implementation wired into
-the app today. The schema is one `events` table with both indexed
-columns (for fast aggregation) and a full JSON `payload` column (for a
-lossless round-trip back into `BusinessEvent`) - this avoids needing
-separate tables per event kind while still letting `guss-insights` do
-real SQL aggregation instead of parsing JSON per row.
+`Store` is a trait with two implementations: `SqliteStore` (default) and
+`PostgresStore` (behind the `postgres` Cargo feature). The schema is one
+`events` table with both indexed columns (for fast aggregation) and a
+full JSON `payload` column (for a lossless round-trip back into
+`BusinessEvent`) - this avoids needing separate tables per event kind
+while still letting `guss-insights` do real SQL aggregation instead of
+parsing JSON per row. Shared row-mapping logic (`columns_for` and
+friends) lives in `event_columns.rs` so both backends stay in sync from
+one implementation.
+
+```mermaid
+graph LR
+    config["GUSS_STORE__URL"] --> any["AnyStore::connect"]
+    any -->|"sqlite:..."| sqlite["SqliteStore<br/>(always compiled in)"]
+    any -->|"postgres://..."| postgres["PostgresStore<br/>(--features postgres)"]
+    sqlite --> trait["Store trait"]
+    postgres --> trait
+```
+
+**Runtime dialect selection.** `apps/guss-app` is generic over one
+concrete `S: Store` (same as every channel adapter - see Channels
+below), so picking a backend at runtime without turning every generic
+site into a trait object is done with a small enum, `AnyStore`
+(`crates/guss-store/src/any.rs`): it wraps either `SqliteStore` or
+(feature-gated) `PostgresStore` and forwards each `Store` method to
+whichever variant is active. `AnyStore::connect` reads the scheme off
+`GUSS_STORE__URL` - `sqlite:` or `postgres://`/`postgresql://` - and
+fails fast with a clear message if you ask for Postgres without having
+built with `--features postgres`.
 
 Document retrieval (for NLU context - see below) uses SQLite's FTS5
-full-text search, confirmed working in this repo's own test suite
-against the bundled `libsqlite3-sys` build.
+full-text search on `SqliteStore`, confirmed working in this repo's own
+test suite against the bundled `libsqlite3-sys` build. `PostgresStore`
+gets the same OR-of-keywords retrieval behavior from a generated
+`tsvector` column plus `websearch_to_tsquery` instead of FTS5 - no
+triggers needed, since Postgres maintains the generated column itself.
 
-**Postgres status**: `guss-store` has a `postgres` Cargo feature flag
-and the schema is written to be dialect-agnostic, but no `PostgresStore`
-implementing `Store` has been written yet, and `guss-app` only calls
-`SqliteStore::connect`. This is flagged honestly rather than silently -
-a `postgres://` URL in config fails fast with a clear message rather
-than being silently mishandled.
+**Testing.** `SqliteStore`'s test suite runs as part of the default
+`cargo test --workspace`. `PostgresStore`'s equivalent suite is
+`#[ignore]`d and reads `GUSS_TEST_POSTGRES_URL` from the environment, so
+it only runs where a real Postgres is available - locally if you set
+that variable, or in CI's `postgres-integration` job against a
+`postgres:16-alpine` service container (see
+`.github/workflows/ci.yml`).
 
 ## LLM extraction (`guss-llm`, `guss-nlu`)
 
@@ -89,6 +130,35 @@ No embeddings, no vector DB - appropriately lightweight for a few
 hundred rows of reference text.
 
 ## Confirmation-before-commit and undo
+
+```mermaid
+sequenceDiagram
+    participant U as Owner
+    participant C as Channel adapter
+    participant O as Orchestrator
+    participant N as NLU (guss-nlu/guss-llm)
+    participant S as Store
+
+    U->>C: "sold 3 bags of rice at 500 each"
+    C->>O: handle_inbound(provider_message_id, text)
+    O->>S: mark_message_processed(source, id)
+    alt already seen (webhook redelivery)
+        S-->>O: false
+        O-->>C: Ok(None) - skipped, not re-processed
+    else first delivery
+        S-->>O: true
+        O->>N: extract(text)
+        N-->>O: BusinessEvent::Sale { ... }
+        O->>S: save_event(event)
+        O-->>C: confirmation text (real numbers)
+        C-->>U: "Sold: 3 rice at 500.00 = 1500.00. Reply 'no' within 5 min to undo."
+        opt owner replies "no"/"undo" within 5 minutes
+            U->>C: "no"
+            C->>O: handle_message(conversation_key, "no")
+            O->>S: delete_event(id) for each pending commit
+        end
+    end
+```
 
 Every extracted event is written to the store immediately (so the
 owner's confirmation message shows real numbers), but the
@@ -161,6 +231,19 @@ Reports render through `handlebars` templates in `templates/en/` and
 
 ## Voice (`guss-voice`)
 
+```mermaid
+graph LR
+    subgraph "Voice input (Telegram/WhatsApp voice notes, CLI `voice <path>`)"
+        opus["Opus-in-OGG bytes"] -->|ffmpeg| wav["16kHz mono WAV"]
+        wav --> whisper["WhisperStt<br/>(--features local-whisper)"]
+        whisper --> text1["transcript"]
+    end
+    subgraph "Voice output (replies)"
+        text2["report / confirmation text"] --> tts["Tts: PiperTts or ElevenLabsTts"]
+        tts --> clip["AudioClip"]
+    end
+```
+
 - **STT**: local Whisper via `whisper-rs`, gated behind the
   `local-whisper` Cargo feature (on by default *at the `guss-voice`
   crate level*, but the `guss` binary and `guss-channels` depend on it
@@ -171,7 +254,12 @@ Reports render through `handlebars` templates in `templates/en/` and
   Guss can paper over. Configured for greedy decoding at temperature 0,
   tuned `logprob_thold`/`entropy_thold`, and optional Silero VAD
   pre-filtering - the actual mitigations for whisper.cpp's documented
-  hallucinate-stock-phrases-on-silence behavior.
+  hallucinate-stock-phrases-on-silence behavior. Verified end-to-end in
+  CI (the `whisper-e2e` job in `.github/workflows/ci.yml`) against a real
+  synthesized speech sample: `espeak-ng` generates the audio, it's run
+  through the same `ffmpeg` conversion real voice notes use, then through
+  `WhisperStt`, and the transcript is asserted to contain the expected
+  words.
 - **TTS**: `PiperTts` (shells out to the official `piper` CLI binary -
   no mature pure-Rust Piper binding exists) is the free, local default;
   `ElevenLabsTts` is a straight HTTP client, swappable with zero code

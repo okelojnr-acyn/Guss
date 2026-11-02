@@ -26,9 +26,17 @@ pub struct WhisperStt {
 }
 
 impl WhisperStt {
-    pub fn new(model_path: &str, language: impl Into<String>, vad_model_path: Option<String>) -> Result<Self, VoiceError> {
+    pub fn new(
+        model_path: &str,
+        language: impl Into<String>,
+        vad_model_path: Option<String>,
+    ) -> Result<Self, VoiceError> {
         let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-            .map_err(|e| VoiceError::Transcription(format!("failed to load whisper model at \"{model_path}\": {e}")))?;
+            .map_err(|e| {
+                VoiceError::Transcription(format!(
+                    "failed to load whisper model at \"{model_path}\": {e}"
+                ))
+            })?;
 
         if vad_model_path.is_none() {
             tracing::warn!(
@@ -37,7 +45,11 @@ impl WhisperStt {
             );
         }
 
-        Ok(Self { ctx, language: language.into(), vad_model_path })
+        Ok(Self {
+            ctx,
+            language: language.into(),
+            vad_model_path,
+        })
     }
 }
 
@@ -46,10 +58,9 @@ impl Stt for WhisperStt {
     async fn transcribe(&self, wav16k_mono: &[u8]) -> Result<String, VoiceError> {
         let samples = decode_wav16_mono_pcm(wav16k_mono)?;
 
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| VoiceError::Transcription(format!("failed to create whisper state: {e}")))?;
+        let mut state = self.ctx.create_state().map_err(|e| {
+            VoiceError::Transcription(format!("failed to create whisper state: {e}"))
+        })?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_temperature(0.0);
@@ -80,7 +91,9 @@ impl Stt for WhisperStt {
                         }
                         text.push_str(s.trim());
                     }
-                    Err(e) => tracing::warn!(segment = i, error = %e, "skipping unreadable whisper segment"),
+                    Err(e) => {
+                        tracing::warn!(segment = i, error = %e, "skipping unreadable whisper segment")
+                    }
                 }
             }
         }

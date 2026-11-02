@@ -56,7 +56,12 @@ pub async fn build_report<S: Store + ?Sized>(
     Ok(compute_report(&events, low_stock, window, currency))
 }
 
-pub fn compute_report(events: &[BusinessEvent], low_stock: Vec<StockLevel>, window: TimeWindow, currency: &str) -> ReportData {
+pub fn compute_report(
+    events: &[BusinessEvent],
+    low_stock: Vec<StockLevel>,
+    window: TimeWindow,
+    currency: &str,
+) -> ReportData {
     let mut sales_by_item: HashMap<String, (f64, i64)> = HashMap::new(); // item -> (quantity, revenue_minor)
     let mut stock_delta_by_item: HashMap<String, f64> = HashMap::new();
     let mut threshold_ever_set: HashMap<String, bool> = HashMap::new();
@@ -72,36 +77,47 @@ pub fn compute_report(events: &[BusinessEvent], low_stock: Vec<StockLevel>, wind
                 let revenue_minor = sale.total().amount.minor_units;
                 total_revenue_minor += revenue_minor;
 
-                let entry = sales_by_item.entry(sale.item_name.clone()).or_insert((0.0, 0));
+                let entry = sales_by_item
+                    .entry(sale.item_name.clone())
+                    .or_insert((0.0, 0));
                 entry.0 += sale.quantity;
                 entry.1 += revenue_minor;
 
-                *stock_delta_by_item.entry(sale.item_name.clone()).or_insert(0.0) -= sale.quantity;
+                *stock_delta_by_item
+                    .entry(sale.item_name.clone())
+                    .or_insert(0.0) -= sale.quantity;
 
                 if let Some(r) = &sale.recurring {
                     let major = minor_to_major(revenue_minor, &sale.unit_price.currency);
-                    *recurring_revenue.entry(r.label.clone()).or_insert(0.0) += major * r.interval.monthly_factor();
+                    *recurring_revenue.entry(r.label.clone()).or_insert(0.0) +=
+                        major * r.interval.monthly_factor();
                 }
             }
             BusinessEvent::Expense(expense) => {
                 total_expenses_minor += expense.amount.amount.minor_units;
                 if let Some(r) = &expense.recurring {
-                    let major = minor_to_major(expense.amount.amount.minor_units, &expense.amount.currency);
-                    *recurring_expenses.entry(r.label.clone()).or_insert(0.0) += major * r.interval.monthly_factor();
+                    let major =
+                        minor_to_major(expense.amount.amount.minor_units, &expense.amount.currency);
+                    *recurring_expenses.entry(r.label.clone()).or_insert(0.0) +=
+                        major * r.interval.monthly_factor();
                 }
             }
             BusinessEvent::StockUpdate(su) => {
-                *stock_delta_by_item.entry(su.item_name.clone()).or_insert(0.0) += su.delta;
+                *stock_delta_by_item
+                    .entry(su.item_name.clone())
+                    .or_insert(0.0) += su.delta;
                 if su.reorder_threshold.is_some() {
                     threshold_ever_set.insert(su.item_name.clone(), true);
                 }
-                if su.delta > 0.0 {
-                    if let Some(cost) = &su.unit_cost {
-                        let cost_major = minor_to_major(cost.amount.minor_units, &cost.currency);
-                        let entry = restock_cost_weighted.entry(su.item_name.clone()).or_insert((0.0, 0.0));
-                        entry.0 += su.delta * cost_major;
-                        entry.1 += su.delta;
-                    }
+                if su.delta > 0.0
+                    && let Some(cost) = &su.unit_cost
+                {
+                    let cost_major = minor_to_major(cost.amount.minor_units, &cost.currency);
+                    let entry = restock_cost_weighted
+                        .entry(su.item_name.clone())
+                        .or_insert((0.0, 0.0));
+                    entry.0 += su.delta * cost_major;
+                    entry.1 += su.delta;
                 }
             }
             BusinessEvent::Note(_) => {}
@@ -113,13 +129,21 @@ pub fn compute_report(events: &[BusinessEvent], low_stock: Vec<StockLevel>, wind
         .map(|(name, (qty, rev))| ItemStat {
             item_name: name.clone(),
             quantity: *qty,
-            revenue: CurrencyAmount { amount: guss_core::money::Money::from_minor_units(*rev), currency: currency.to_string() },
+            revenue: CurrencyAmount {
+                amount: guss_core::money::Money::from_minor_units(*rev),
+                currency: currency.to_string(),
+            },
         })
         .collect();
     by_quantity.sort_by(|a, b| b.quantity.partial_cmp(&a.quantity).unwrap());
 
     let mut by_revenue = by_quantity.clone();
-    by_revenue.sort_by(|a, b| b.revenue.amount.minor_units.cmp(&a.revenue.amount.minor_units));
+    by_revenue.sort_by(|a, b| {
+        b.revenue
+            .amount
+            .minor_units
+            .cmp(&a.revenue.amount.minor_units)
+    });
 
     let top_sellers_by_quantity = by_quantity.iter().take(3).cloned().collect();
     let bottom_sellers_by_quantity = {
@@ -146,7 +170,9 @@ pub fn compute_report(events: &[BusinessEvent], low_stock: Vec<StockLevel>, wind
         }
         let avg_cost_major = qty_cost_sum / qty_sum;
         if let Some((sold_qty, _)) = sales_by_item.get(item) {
-            cogs_minor += CurrencyAmount::new(sold_qty * avg_cost_major, currency.to_string()).amount.minor_units;
+            cogs_minor += CurrencyAmount::new(sold_qty * avg_cost_major, currency.to_string())
+                .amount
+                .minor_units;
             any_cost_known = true;
         }
     }
@@ -162,10 +188,18 @@ pub fn compute_report(events: &[BusinessEvent], low_stock: Vec<StockLevel>, wind
     ReportData {
         window,
         currency: currency.to_string(),
-        total_revenue: CurrencyAmount { amount: guss_core::money::Money::from_minor_units(total_revenue_minor), currency: currency.to_string() },
-        total_expenses: CurrencyAmount { amount: guss_core::money::Money::from_minor_units(total_expenses_minor), currency: currency.to_string() },
+        total_revenue: CurrencyAmount {
+            amount: guss_core::money::Money::from_minor_units(total_revenue_minor),
+            currency: currency.to_string(),
+        },
+        total_expenses: CurrencyAmount {
+            amount: guss_core::money::Money::from_minor_units(total_expenses_minor),
+            currency: currency.to_string(),
+        },
         net_cash_basis: CurrencyAmount {
-            amount: guss_core::money::Money::from_minor_units(total_revenue_minor - total_expenses_minor),
+            amount: guss_core::money::Money::from_minor_units(
+                total_revenue_minor - total_expenses_minor,
+            ),
             currency: currency.to_string(),
         },
         gross_margin,
@@ -176,21 +210,30 @@ pub fn compute_report(events: &[BusinessEvent], low_stock: Vec<StockLevel>, wind
         declining_no_threshold,
         recurring_revenue: recurring_revenue
             .into_iter()
-            .map(|(label, major)| MrrLine { label, monthly_amount: CurrencyAmount::new(major, currency.to_string()) })
+            .map(|(label, major)| MrrLine {
+                label,
+                monthly_amount: CurrencyAmount::new(major, currency.to_string()),
+            })
             .collect(),
         recurring_expenses: recurring_expenses
             .into_iter()
-            .map(|(label, major)| MrrLine { label, monthly_amount: CurrencyAmount::new(major, currency.to_string()) })
+            .map(|(label, major)| MrrLine {
+                label,
+                monthly_amount: CurrencyAmount::new(major, currency.to_string()),
+            })
             .collect(),
     }
 }
 
 fn minor_to_major(minor_units: i64, currency: &str) -> f64 {
-    CurrencyAmount { amount: guss_core::money::Money::from_minor_units(minor_units), currency: currency.to_string() }
-        .amount
-        .format_in(currency)
-        .parse()
-        .unwrap_or(0.0)
+    CurrencyAmount {
+        amount: guss_core::money::Money::from_minor_units(minor_units),
+        currency: currency.to_string(),
+    }
+    .amount
+    .format_in(currency)
+    .parse()
+    .unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -214,7 +257,12 @@ mod tests {
         })
     }
 
-    fn restock(item: &str, delta: f64, threshold: Option<f64>, unit_cost: Option<f64>) -> BusinessEvent {
+    fn restock(
+        item: &str,
+        delta: f64,
+        threshold: Option<f64>,
+        unit_cost: Option<f64>,
+    ) -> BusinessEvent {
         BusinessEvent::StockUpdate(StockUpdate {
             id: Uuid::new_v4(),
             business_id: Uuid::new_v4(),
@@ -248,7 +296,10 @@ mod tests {
 
     #[test]
     fn declining_item_with_threshold_is_not_in_no_threshold_bucket() {
-        let events = vec![restock("rice", 5.0, Some(10.0), None), sale("rice", 8.0, 500.0)];
+        let events = vec![
+            restock("rice", 5.0, Some(10.0), None),
+            sale("rice", 8.0, 500.0),
+        ];
         let report = compute_report(&events, vec![], TimeWindow::Day, "USD");
 
         assert!(report.declining_no_threshold.is_empty());
@@ -260,11 +311,17 @@ mod tests {
         let report_no_cost = compute_report(&events, vec![], TimeWindow::Day, "USD");
         assert!(report_no_cost.gross_margin.is_none());
 
-        let events_with_cost = vec![restock("rice", 20.0, None, Some(2.0)), sale("rice", 10.0, 5.0)];
+        let events_with_cost = vec![
+            restock("rice", 20.0, None, Some(2.0)),
+            sale("rice", 10.0, 5.0),
+        ];
         let report_with_cost = compute_report(&events_with_cost, vec![], TimeWindow::Day, "USD");
         assert!(report_with_cost.gross_margin.is_some());
         // revenue 50.00 - cogs (10 * 2.00) = 30.00
-        assert_eq!(report_with_cost.gross_margin.unwrap().amount.minor_units, 3000);
+        assert_eq!(
+            report_with_cost.gross_margin.unwrap().amount.minor_units,
+            3000
+        );
     }
 
     #[test]
@@ -273,12 +330,26 @@ mod tests {
             BusinessEvent::Sale(s) => s,
             _ => unreachable!(),
         };
-        recurring_sale.recurring = Some(RecurrenceInfo { interval: RecurrenceInterval::Weekly, label: "Acme retainer".into() });
-        let report = compute_report(&[BusinessEvent::Sale(recurring_sale)], vec![], TimeWindow::Week, "USD");
+        recurring_sale.recurring = Some(RecurrenceInfo {
+            interval: RecurrenceInterval::Weekly,
+            label: "Acme retainer".into(),
+        });
+        let report = compute_report(
+            &[BusinessEvent::Sale(recurring_sale)],
+            vec![],
+            TimeWindow::Week,
+            "USD",
+        );
 
         assert_eq!(report.recurring_revenue.len(), 1);
         assert_eq!(report.recurring_revenue[0].label, "Acme retainer");
         // 100 * 4.33 = 433.00
-        assert_eq!(report.recurring_revenue[0].monthly_amount.amount.minor_units, 43300);
+        assert_eq!(
+            report.recurring_revenue[0]
+                .monthly_amount
+                .amount
+                .minor_units,
+            43300
+        );
     }
 }
