@@ -1,5 +1,9 @@
 # Guss
 
+[![CI](https://github.com/okelojnr-acyn/Guss/actions/workflows/ci.yml/badge.svg)](https://github.com/okelojnr-acyn/Guss/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+
 A self-hosted business co-pilot you talk to, not a dashboard you check.
 
 Tell Guss what happened in your shop today - by typing or by voice, over
@@ -99,9 +103,11 @@ docker compose up --build
 ```
 
 Add `--profile ollama` to also run a local Ollama instance in the same
-compose stack. See [docker-compose.yml](docker-compose.yml) for the
-Postgres profile's current status (schema groundwork exists; it isn't
-wired into the app yet - see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+compose stack, or `--profile postgres` to run Postgres instead of the
+default SQLite file (build with `GUSS_FEATURES=postgres` and set
+`GUSS_STORE__URL` accordingly - see
+[docker-compose.yml](docker-compose.yml) and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
 ## How it's built
 
@@ -116,17 +122,28 @@ fail in production.
 ## Status
 
 This is a real, working Phase 1: every channel, the LLM extraction
-pipeline, insights/reporting, and the scheduler are implemented and
-covered by automated tests (run `cargo test --workspace
---no-default-features`). What's explicitly not done yet:
+pipeline, insights/reporting, the scheduler, and both storage backends
+are implemented and covered by automated tests (run `cargo test
+--workspace --no-default-features` for the default sqlite-only suite;
+CI also runs the Postgres and Whisper suites below).
 
-- **Postgres storage** - the trait and schema are dialect-ready, but only
-  SQLite is wired into the app today.
+- **Postgres storage** is wired in behind `--features postgres`
+  (`PostgresStore`, selected at runtime from `GUSS_STORE__URL`'s scheme -
+  see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), with its own test
+  suite running in CI against a real Postgres service container.
 - **Local Whisper speech-to-text** is feature-gated behind
-  `local-whisper` (needs a C/C++ toolchain + CMake to build) and hasn't
-  been verified end-to-end against a real audio sample in this
-  repository's own CI environment - the code is written against the real
-  `whisper-rs` API, but build it and try it yourself before relying on it.
+  `local-whisper` (needs a C/C++ toolchain + CMake to build - see
+  [docs/setup-elevenlabs-piper.md](docs/setup-elevenlabs-piper.md)) and
+  is verified end-to-end in CI against a real synthesized speech sample
+  (see the `whisper-e2e` job in
+  [.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup and the checks CI
+runs on every PR, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for how
+we expect people to treat each other here. Found a security issue? See
+[SECURITY.md](SECURITY.md) instead of opening a public issue.
 
 ## License
 

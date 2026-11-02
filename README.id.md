@@ -1,5 +1,9 @@
 # Guss
 
+[![CI](https://github.com/okelojnr-acyn/Guss/actions/workflows/ci.yml/badge.svg)](https://github.com/okelojnr-acyn/Guss/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+
 Asisten bisnis mandiri yang Anda ajak bicara, bukan dasbor yang harus Anda
 cek terus-menerus.
 
@@ -107,9 +111,10 @@ docker compose up --build
 ```
 
 Tambahkan `--profile ollama` untuk juga menjalankan Ollama lokal dalam
-compose stack yang sama. Lihat [docker-compose.yml](docker-compose.yml)
-untuk status terkini profil Postgres (kerangka skema sudah ada; belum
-terhubung ke aplikasi - lihat
+compose stack yang sama, atau `--profile postgres` untuk memakai Postgres
+alih-alih file SQLite default (build dengan `GUSS_FEATURES=postgres` dan
+atur `GUSS_STORE__URL` sesuai - lihat
+[docker-compose.yml](docker-compose.yml) dan
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
 ## Cara ini dibangun
@@ -126,17 +131,28 @@ muncul dari riset bagaimana sistem serupa biasanya gagal di produksi.
 ## Status
 
 Ini adalah Fase 1 yang nyata dan berfungsi: setiap kanal, pipeline
-ekstraksi LLM, insight/laporan, dan scheduler sudah diimplementasikan
-dan diuji otomatis (jalankan `cargo test --workspace
---no-default-features`). Yang secara jelas belum selesai:
+ekstraksi LLM, insight/laporan, scheduler, dan kedua backend penyimpanan
+sudah diimplementasikan dan diuji otomatis (jalankan `cargo test
+--workspace --no-default-features` untuk suite sqlite default; CI juga
+menjalankan suite Postgres dan Whisper di bawah ini).
 
-- **Penyimpanan Postgres** - trait dan skemanya sudah siap lintas
-  dialek, tapi hanya SQLite yang terhubung ke aplikasi saat ini.
+- **Penyimpanan Postgres** sudah terhubung lewat `--features postgres`
+  (`PostgresStore`, dipilih saat runtime dari skema `GUSS_STORE__URL` -
+  lihat [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), dengan test suite
+  sendiri yang berjalan di CI melawan Postgres service container nyata.
 - **Speech-to-text Whisper lokal** diaktifkan lewat fitur Cargo
-  `local-whisper` (perlu toolchain C/C++ + CMake untuk build) dan belum
-  diverifikasi end-to-end dengan sampel audio nyata di lingkungan kerja
-  repositori ini - kodenya ditulis sesuai API `whisper-rs` yang
-  sebenarnya, tapi coba build dan uji sendiri sebelum mengandalkannya.
+  `local-whisper` (perlu toolchain C/C++ + CMake untuk build - lihat
+  [docs/setup-elevenlabs-piper.md](docs/setup-elevenlabs-piper.md)) dan
+  sudah diverifikasi end-to-end di CI melawan sampel suara sintetis nyata
+  (lihat job `whisper-e2e` di
+  [.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
+## Berkontribusi
+
+Lihat [CONTRIBUTING.md](CONTRIBUTING.md) (Bahasa Inggris) untuk setup
+dev dan pengecekan yang dijalankan CI pada setiap PR, serta
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Menemukan masalah keamanan?
+Lihat [SECURITY.md](SECURITY.md) - jangan buka issue publik untuk itu.
 
 ## Lisensi
 
