@@ -27,13 +27,12 @@ services:
       - ollama-data:/root/.ollama
     restart: unless-stopped
 
-  # NOT YET WIRED UP: guss-store has a "postgres" cargo feature flag and
-  # schema groundwork (every table/column is dialect-agnostic), but
-  # guss-app only calls SqliteStore::connect today - a PostgresStore
-  # implementing the same Store trait is a documented follow-up, not
-  # something this compose file can turn on by itself yet. This service
-  # is left here as the intended shape for that work, not a working
-  # Supabase-style setup - see docs/ARCHITECTURE.md.
+  # Optional Postgres backend. Only starts if you run
+  # `docker compose --profile postgres up`. Build the guss image with
+  # GUSS_FEATURES=postgres and point GUSS_STORE__URL at
+  # postgres://guss:guss@postgres:5432/guss in your .env to use it - see
+  # docs/ARCHITECTURE.md's Storage section. SQLite (no profile, no extra
+  # build feature) remains the zero-config default.
   postgres:
     image: postgres:16-alpine
     profiles: ["postgres"]
