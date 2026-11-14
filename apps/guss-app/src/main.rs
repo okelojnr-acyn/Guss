@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use config::AppConfig;
-use guss_channels::{Orchestrator, VoiceSupport, cli, telegram};
+use guss_channels::{Orchestrator, VoiceSupport, cli, telegram, web};
 use guss_core::domain::BusinessProfile;
 use guss_core::store::Store;
 use guss_llm::OpenAiCompatibleProvider;
@@ -165,6 +165,25 @@ async fn main() {
     let scheduler_store = store.clone();
     let scheduler_business = business.clone();
     let orchestrator = Arc::new(Orchestrator::new(nlu, store, business));
+
+    match config.web.token.as_deref().map(str::trim) {
+        Some(token) if token.len() >= 24 => {
+            let web_config = web::WebConfig {
+                token: token.to_string(),
+                listen_addr: config.web.listen_addr.clone(),
+            };
+            let web_orchestrator = orchestrator.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::run(web_orchestrator, web_config).await {
+                    tracing::error!(error = %e, "web API stopped");
+                }
+            });
+        }
+        Some(_) => {
+            tracing::warn!("GUSS_WEB__TOKEN is shorter than 24 characters - web API not started.")
+        }
+        None => {}
+    }
 
     match config.channel.kind.as_str() {
         "cli" => {

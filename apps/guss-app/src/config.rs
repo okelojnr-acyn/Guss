@@ -193,6 +193,31 @@ pub struct AppConfig {
     pub tts: TtsConfig,
     #[serde(default)]
     pub channel: ChannelConfig,
+    #[serde(default)]
+    pub web: WebConfig,
+}
+
+/// The HTTP API other apps (the Friday widget) use. Off unless a token is
+/// set; it runs next to whichever channel is configured.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebConfig {
+    pub token: Option<String>,
+    // 8081, not 8080: the WhatsApp webhook already listens on 8080.
+    #[serde(default = "default_web_listen_addr")]
+    pub listen_addr: String,
+}
+
+fn default_web_listen_addr() -> String {
+    "0.0.0.0:8081".to_string()
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            token: None,
+            listen_addr: default_web_listen_addr(),
+        }
+    }
 }
 
 impl Default for StoreConfig {

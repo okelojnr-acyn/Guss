@@ -185,6 +185,7 @@ fn source_channel_tag(channel: SourceChannel) -> &'static str {
         SourceChannel::Cli => "cli",
         SourceChannel::Telegram => "telegram",
         SourceChannel::WhatsApp => "whatsapp",
+        SourceChannel::Web => "web",
     }
 }
 

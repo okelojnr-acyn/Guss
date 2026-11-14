@@ -31,5 +31,5 @@ COPY --from=builder /build/target/release/guss /usr/local/bin/guss
 VOLUME ["/app/data"]
 ENV GUSS_STORE__URL=sqlite:///app/data/guss.db
 
-EXPOSE 8080
+EXPOSE 8080 8081
 ENTRYPOINT ["guss"]

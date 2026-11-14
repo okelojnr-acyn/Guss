@@ -29,6 +29,7 @@ pub fn source_channel_str(c: SourceChannel) -> &'static str {
         SourceChannel::Cli => "cli",
         SourceChannel::Telegram => "telegram",
         SourceChannel::WhatsApp => "whatsapp",
+        SourceChannel::Web => "web",
     }
 }
 

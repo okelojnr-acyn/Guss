@@ -39,6 +39,7 @@ pub enum SourceChannel {
     Cli,
     Telegram,
     WhatsApp,
+    Web,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
