@@ -101,3 +101,34 @@ jobs:
           GUSS_TEST_WHISPER_MODEL_PATH: ${{ github.workspace }}/models/ggml-tiny.en.bin
           GUSS_TEST_WHISPER_WAV_PATH: ${{ github.workspace }}/sample.wav
         run: cargo test -p guss-voice --features local-whisper -- --ignored whisper_transcribes_real_speech
+
+  publish:
+    # Versioned image for Friday Host one-click deploys:
+    # ghcr.io/okelojnr-acyn/guss:<sha> plus :latest (public, linked to this
+    # repo). Only after every test job passed on main.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, postgres-integration, whisper-e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/okelojnr-acyn/guss:${{ github.sha }}
+            ghcr.io/okelojnr-acyn/guss:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/okelojnr-acyn/Guss
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=guss
+          cache-to: type=gha,mode=max,scope=guss
