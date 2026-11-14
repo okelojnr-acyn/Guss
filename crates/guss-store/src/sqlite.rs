@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document};
 use guss_core::store::{StockLevel, Store, StoreError, TimeWindow};
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use std::str::FromStr;
+
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use uuid::Uuid;
 
 use crate::event_columns::columns_for;
@@ -18,11 +20,16 @@ fn db_err(e: sqlx::Error) -> StoreError {
 
 impl SqliteStore {
     /// `url` is a sqlx sqlite connection string, e.g. `sqlite://guss.db` or
-    /// `sqlite::memory:` for tests.
+    /// `sqlite::memory:` for tests. The database file is created if it
+    /// doesn't exist yet (sqlx's default is to fail), so a fresh, empty
+    /// data volume works on first start.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
+        let options = SqliteConnectOptions::from_str(url)
+            .map_err(db_err)?
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(url)
+            .connect_with(options)
             .await
             .map_err(db_err)?;
         sqlx::migrate!("./migrations")
@@ -35,6 +42,24 @@ impl SqliteStore {
     #[cfg(test)]
     pub async fn connect_in_memory() -> Result<Self, StoreError> {
         Self::connect("sqlite::memory:").await
+    }
+}
+
+#[cfg(test)]
+mod create_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creates_missing_database_file() {
+        let dir = std::env::temp_dir().join(format!("guss-create-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("guss.db");
+        let url = format!("sqlite://{}", path.display());
+        SqliteStore::connect(&url)
+            .await
+            .expect("fresh database should be created");
+        assert!(path.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
