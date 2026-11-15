@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::people::Actor;
-use guss_core::store::{
-    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest,
-};
+use guss_core::store::{JournalEntry, StockLevel, Store, StoreError, SyncItem, VoidRequest};
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]

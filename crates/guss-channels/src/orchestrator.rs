@@ -12,6 +12,7 @@ use guss_nlu::{Nlu, NluError, extract_keywords};
 
 use crate::items::{self, Catalog, UnitQuestion};
 use crate::journal_texts as texts;
+use guss_nlu::Question as BooksQuestion;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -109,6 +110,66 @@ pub enum Notify {
     Approvers(String),
     /// One person, by actor id ("telegram:12345").
     Person(String, String),
+}
+
+impl OrchestratorError {
+    /// What to tell the person, in the business language: always that
+    /// nothing was saved, and what to do about it. The details stay in the
+    /// logs (and Friday Host shows them on the machine).
+    pub fn user_message(&self, language: &str) -> String {
+        let id = language == "id";
+        let ai = |msg: &str| -> &'static str {
+            let m = msg.to_lowercase();
+            if m.contains("401") || m.contains("invalid_api_key") || m.contains("invalid api key") {
+                if id {
+                    "Penyedia AI menolak kunci Guss. Pemilik perlu memeriksanya di pengaturan Guss."
+                } else {
+                    "The AI provider refused Guss's key. The owner needs to check it in Guss's settings."
+                }
+            } else if m.contains("429") || m.contains("rate limit") || m.contains("rate_limit") {
+                if id {
+                    "Penyedia AI sedang sibuk (batas pemakaian). Coba lagi sebentar lagi."
+                } else {
+                    "The AI provider is busy (usage limit reached). Try again in a minute."
+                }
+            } else if m.contains("404")
+                || m.contains("model_not_found")
+                || m.contains("decommissioned")
+            {
+                if id {
+                    "Model AI yang dipilih tidak tersedia lagi. Pemilik perlu memilih model lain di pengaturan Guss."
+                } else {
+                    "The chosen AI model isn't available any more. The owner needs to pick another in Guss's settings."
+                }
+            } else if id {
+                "Tidak bisa menghubungi penyedia AI. Coba lagi sebentar lagi."
+            } else {
+                "Couldn't reach the AI provider. Try again in a minute."
+            }
+        };
+        let why: String = match self {
+            OrchestratorError::Nlu(NluError::Llm(guss_llm::LlmError::Request(msg))) => ai(msg).into(),
+            OrchestratorError::Nlu(NluError::Llm(_)) => ai("").into(),
+            OrchestratorError::Nlu(NluError::Unparseable { .. }) => if id {
+                "Saya tidak bisa memahami pesan itu. Coba katakan dengan cara lain, misalnya \"jual 3 beras 12000\"."
+            } else {
+                "I couldn't make sense of that one. Try saying it another way, e.g. \"sold 3 rice at 120\"."
+            }
+            .into(),
+            OrchestratorError::Store(_) => if id {
+                "Tidak bisa membuka pembukuan. Coba lagi sebentar lagi."
+            } else {
+                "Couldn't open the books. Try again in a minute."
+            }
+            .into(),
+            OrchestratorError::VoiceNotConfigured(why) => why.clone(),
+        };
+        if id {
+            format!("{why}\nTidak ada yang disimpan.")
+        } else {
+            format!("{why}\nNothing was saved.")
+        }
+    }
 }
 
 struct PendingCommit {
@@ -266,6 +327,9 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         let events = extraction.events;
 
         if events.is_empty() {
+            if let Some(q) = extraction.question {
+                return self.answer(actor, &q).await;
+            }
             return Ok(no_events_reply(language));
         }
         self.prepare(actor, conversation_key, events, home).await
@@ -391,6 +455,53 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 Ok(undone_reply(&self.business.language))
             }
             _ => Ok(nothing_to_undo_reply(&self.business.language)),
+        }
+    }
+
+    /// Answers a question from the books. Staff get today's figures only,
+    /// like /report.
+    async fn answer(&self, actor: &Actor, q: &BooksQuestion) -> Result<String, OrchestratorError> {
+        let language = self.business.language.as_str();
+        match q {
+            BooksQuestion::StockLeft { item_name } => {
+                let catalog = self.catalog().await?;
+                let (name, unit) = match catalog.find(item_name) {
+                    Some(item) => (item.name.clone(), item.base_unit.clone()),
+                    None => (items::normalize_name(item_name), None),
+                };
+                let left = self.store.current_stock(self.business.id, &name).await?;
+                Ok(texts::stock_left(
+                    &name,
+                    left,
+                    unit.as_deref(),
+                    catalog.find(item_name).is_some(),
+                    language,
+                ))
+            }
+            BooksQuestion::Totals { period, about } => {
+                let window = match period.trim().to_lowercase().as_str() {
+                    "week" => TimeWindow::Week,
+                    "month" => TimeWindow::Month,
+                    _ => TimeWindow::Day,
+                };
+                if window != TimeWindow::Day && !actor.role.can(Action::ReportLonger) {
+                    return Ok(texts::longer_reports_not_allowed(language).into());
+                }
+                let Some(about) = about.as_deref().map(str::trim).filter(|a| !a.is_empty()) else {
+                    return self.handle_report(window).await;
+                };
+                let since = window.start_in(Utc::now(), &self.business.timezone);
+                let events = self
+                    .store
+                    .list_events_since(self.business.id, since)
+                    .await?;
+                Ok(texts::totals_about(
+                    about,
+                    window,
+                    &totals_about(&events, about),
+                    language,
+                ))
+            }
         }
     }
 
@@ -700,6 +811,60 @@ fn notes_only_hint(language: &str) -> &'static str {
              purchase, send it again, e.g. \"sold 3 rice at 120\" or \"bought 30 tshirts at 650 each\"."
         }
     }
+}
+
+/// Sales of and expenses for one thing ("rice", "transport") in `events`:
+/// (count of entries, sold quantity, money in per currency, money out per
+/// currency). Matching is by the normalised name containing the word.
+pub(crate) struct AboutTotals {
+    pub entries: usize,
+    pub sold: f64,
+    pub money_in: Vec<CurrencyAmount>,
+    pub money_out: Vec<CurrencyAmount>,
+}
+
+fn totals_about(events: &[BusinessEvent], about: &str) -> AboutTotals {
+    let want = items::normalize_name(about);
+    let hit = |name: &str| {
+        let n = items::normalize_name(name);
+        !want.is_empty() && (n.contains(&want) || want.contains(&n))
+    };
+    let mut out = AboutTotals {
+        entries: 0,
+        sold: 0.0,
+        money_in: vec![],
+        money_out: vec![],
+    };
+    fn add(list: &mut Vec<CurrencyAmount>, a: CurrencyAmount) {
+        match list.iter_mut().find(|x| x.currency == a.currency) {
+            Some(x) => x.amount = x.amount.checked_add(a.amount),
+            None => list.push(a),
+        }
+    }
+    for e in events {
+        match e {
+            BusinessEvent::Sale(s) if hit(&s.item_name) => {
+                out.entries += 1;
+                out.sold += s.base_quantity();
+                add(&mut out.money_in, s.total());
+            }
+            BusinessEvent::Expense(x) if hit(&x.description) => {
+                out.entries += 1;
+                add(&mut out.money_out, x.amount.clone());
+            }
+            BusinessEvent::StockUpdate(su) if hit(&su.item_name) && su.delta > 0.0 => {
+                if let Some(c) = &su.unit_cost {
+                    out.entries += 1;
+                    add(
+                        &mut out.money_out,
+                        CurrencyAmount::new(su.delta * c.major_units(), c.currency.as_str()),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Upper-case codes of every money amount in `events` that isn't in the
@@ -1231,6 +1396,106 @@ mod tests {
                 .unwrap()
                 .reply,
             "There's no entry #999. See /history."
+        );
+    }
+
+    #[tokio::test]
+    async fn questions_are_answered_from_the_books_and_never_stored() {
+        use guss_core::people::Role;
+        let restock = json!({"events": [{"kind": "stock_update", "item_name": "Sodas", "delta": 10.0,
+            "unit": "bottles", "unit_cost_major": null, "total_cost_major": null, "reorder_threshold": null}]});
+        let sale = json!({"events": [{"kind": "sale", "item_name": "soda", "quantity": 3.0, "unit": null,
+            "unit_price_major": 80.0, "total_major": null, "currency": null, "category": null}]});
+        let transport = json!({"events": [{"kind": "expense", "description": "transport", "amount_major": 500.0,
+            "quantity": null, "unit_amount_major": null, "currency": null, "category": null}]});
+        let ask_stock =
+            json!({"events": [], "question": {"kind": "stock_left", "item_name": "sodas"}});
+        let ask_transport = json!({"events": [], "question": {"kind": "totals", "period": "today", "about": "transport"}});
+        let ask_week =
+            json!({"events": [], "question": {"kind": "totals", "period": "week", "about": null}});
+        let ask_unknown =
+            json!({"events": [], "question": {"kind": "stock_left", "item_name": "bread"}});
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let business = BusinessProfile {
+            id: Uuid::new_v4(),
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "Africa/Nairobi".into(),
+        };
+        let script = Script(std::sync::Mutex::new(vec![
+            restock,
+            sale,
+            transport,
+            ask_stock,
+            ask_transport,
+            ask_week,
+            ask_unknown,
+        ]));
+        let o = Orchestrator::new(Nlu::new(script, "en"), store.clone(), business.clone());
+        let boss = Actor::new("telegram:1", "Boss", Role::Owner);
+        let mary = Actor::new("telegram:2", "Mary", Role::Staff);
+        for text in ["got 10 sodas", "sold 3 soda at 80", "paid 500 transport"] {
+            o.handle_message_as(&boss, "c", SourceChannel::Telegram, text)
+                .await
+                .unwrap();
+        }
+        let before = store.journal(business.id, 50).await.unwrap().len();
+
+        let reply = o
+            .handle_message_as(&boss, "c", SourceChannel::Telegram, "how many sodas left?")
+            .await
+            .unwrap();
+        assert_eq!(reply, "soda: 7 bottle left.");
+        let reply = o
+            .handle_message_as(&boss, "c", SourceChannel::Telegram, "transport today?")
+            .await
+            .unwrap();
+        assert_eq!(reply, "transport today: paid 500.00 KES (1 entries).");
+        // Staff get today's figures only.
+        let reply = o
+            .handle_message_as(&mary, "c", SourceChannel::Telegram, "how was the week?")
+            .await
+            .unwrap();
+        assert!(
+            reply.starts_with("Week and month reports are for the owner"),
+            "{reply}"
+        );
+        let reply = o
+            .handle_message_as(&boss, "c", SourceChannel::Telegram, "bread left?")
+            .await
+            .unwrap();
+        assert_eq!(reply, "No stock of bread has been recorded yet.");
+
+        assert_eq!(
+            store.journal(business.id, 50).await.unwrap().len(),
+            before,
+            "questions store nothing"
+        );
+    }
+
+    #[test]
+    fn failures_say_nothing_was_saved_and_what_to_do() {
+        let llm =
+            |m: &str| OrchestratorError::Nlu(NluError::Llm(guss_llm::LlmError::Request(m.into())));
+        let key = llm("HTTP 401 Unauthorized: invalid_api_key").user_message("en");
+        assert!(
+            key.starts_with("The AI provider refused Guss's key"),
+            "{key}"
+        );
+        assert!(key.ends_with("Nothing was saved."), "{key}");
+        let busy = llm("HTTP 429 Too Many Requests: rate limit reached").user_message("id");
+        assert!(busy.starts_with("Penyedia AI sedang sibuk"), "{busy}");
+        assert!(busy.ends_with("Tidak ada yang disimpan."), "{busy}");
+        let gone = llm("HTTP 404 Not Found: model_not_found").user_message("en");
+        assert!(gone.contains("isn't available any more"), "{gone}");
+        let net = llm("error sending request").user_message("en");
+        assert!(net.starts_with("Couldn't reach the AI provider"), "{net}");
+        let muddle =
+            OrchestratorError::Nlu(NluError::Unparseable { raw: "x".into() }).user_message("en");
+        assert!(
+            muddle.starts_with("I couldn't make sense of that one"),
+            "{muddle}"
         );
     }
 

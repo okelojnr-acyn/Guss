@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::people::{Actor, Role};
 use guss_core::store::{
-    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest, Voided,
+    JournalEntry, StockLevel, Store, StoreError, SyncItem, VoidRequest, Voided,
 };
 use sqlx::Row;
 use std::str::FromStr;
@@ -603,6 +603,7 @@ mod tests {
     use super::*;
     use guss_core::domain::{BusinessEvent, Sale, SourceChannel, StockUpdate};
     use guss_core::money::CurrencyAmount;
+    use guss_core::store::TimeWindow;
 
     fn sale(business_id: Uuid, item: &str, qty: f64, price: f64) -> BusinessEvent {
         BusinessEvent::Sale(Sale {

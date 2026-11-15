@@ -163,3 +163,89 @@ pub fn not_in_friday(why: &str, language: &str) -> String {
         format!(" [not in Friday: {why}]")
     }
 }
+
+fn qty(n: f64) -> String {
+    if n.fract().abs() < 1e-9 {
+        format!("{n:.0}")
+    } else {
+        format!("{n:.2}")
+    }
+}
+
+pub fn stock_left(
+    item: &str,
+    left: f64,
+    unit: Option<&str>,
+    known: bool,
+    language: &str,
+) -> String {
+    let unit = unit.map(|u| format!(" {u}")).unwrap_or_default();
+    match (known, id(language)) {
+        (false, true) => format!("Belum ada stok {item} yang tercatat."),
+        (false, false) => format!("No stock of {item} has been recorded yet."),
+        (true, true) => format!("Sisa {item}: {}{unit}.", qty(left)),
+        (true, false) => format!("{item}: {}{unit} left.", qty(left)),
+    }
+}
+
+fn period(window: guss_core::store::TimeWindow, language: &str) -> &'static str {
+    use guss_core::store::TimeWindow::*;
+    match (window, id(language)) {
+        (Day, true) => "hari ini",
+        (Week, true) => "7 hari terakhir",
+        (Month, true) => "30 hari terakhir",
+        (Day, false) => "today",
+        (Week, false) => "in the last 7 days",
+        (Month, false) => "in the last 30 days",
+    }
+}
+
+pub(crate) fn totals_about(
+    about: &str,
+    window: guss_core::store::TimeWindow,
+    t: &crate::orchestrator::AboutTotals,
+    language: &str,
+) -> String {
+    let when = period(window, language);
+    if t.entries == 0 {
+        return if id(language) {
+            format!("Tidak ada catatan untuk {about} {when}.")
+        } else {
+            format!("Nothing recorded for {about} {when}.")
+        };
+    }
+    let list = |v: &[guss_core::money::CurrencyAmount]| {
+        v.iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+    let mut parts = Vec::new();
+    if !t.money_in.is_empty() {
+        parts.push(if id(language) {
+            format!("terjual {} seharga {}", qty(t.sold), list(&t.money_in))
+        } else {
+            format!("sold {} for {}", qty(t.sold), list(&t.money_in))
+        });
+    }
+    if !t.money_out.is_empty() {
+        parts.push(if id(language) {
+            format!("dibayar {}", list(&t.money_out))
+        } else {
+            format!("paid {}", list(&t.money_out))
+        });
+    }
+    if id(language) {
+        format!(
+            "{about} {when}: {} ({} catatan).",
+            parts.join(", "),
+            t.entries
+        )
+    } else {
+        format!(
+            "{about} {when}: {} ({} entries).",
+            parts.join(", "),
+            t.entries
+        )
+    }
+}

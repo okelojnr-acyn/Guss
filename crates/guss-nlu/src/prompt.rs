@@ -34,7 +34,8 @@ Which event:
 - Bought or received stock TO RESELL -> stock_update with a positive delta and what was paid.
 - Bought something for the shop's or staff's OWN use (uniforms, shirts for staff, cleaning supplies, tea, tools), and rent, transport, delivery, fuel, electricity, water, fees, M-Pesa charges, wages, subscriptions -> expense.
 - Stock spoiled, broken, stolen, given away -> stock_update with a negative delta, no cost.
-- Greetings, thanks, "ok", emojis, and QUESTIONS ("how many are left?", "how much did I spend?") -> no events at all: {"events": []}.
+- Greetings, thanks, "ok", emojis -> no events and no question: {"events": [], "question": null}.
+- QUESTIONS about the books -> no events, and set question: "how many tshirts are left?" -> {"kind": "stock_left", "item_name": "tshirt"}; "how much did I sell today?" -> {"kind": "totals", "period": "today", "about": null}; "what did I spend on transport this week?" -> {"kind": "totals", "period": "week", "about": "transport"}. Period is "today", "week" or "month".
 - note: only real business information without money or stock ("slow day, rain").
 
 Numbers:
@@ -50,7 +51,7 @@ Examples:
 "paid 1.5k for fuel" -> expense fuel, amount_major 1500
 "sold 2 crates of soda at 1200 a crate" -> sale soda, quantity 2, unit "crate", unit_price_major 1200
 "5 milk went bad" -> stock_update milk, delta -5
-"thanks" -> {"events": []}
+"thanks" -> {"events": [], "question": null}
 
 Reply with ONLY JSON matching the given schema, no other text."#;
 
@@ -68,7 +69,8 @@ Jenis kejadian:
 - Membeli atau menerima stok UNTUK DIJUAL LAGI -> stock_update dengan delta positif dan harga belinya.
 - Membeli untuk KEPERLUAN toko atau staf sendiri (seragam, kaos staf, alat kebersihan, teh, peralatan), juga sewa, transport, ongkir, bensin, listrik, air, biaya admin, gaji, langganan -> expense.
 - Stok rusak, basi, hilang, diberikan gratis -> stock_update dengan delta negatif, tanpa harga.
-- Salam, terima kasih, "ok", emoji, dan PERTANYAAN ("sisa berapa?", "habis berapa?") -> tidak ada kejadian: {"events": []}.
+- Salam, terima kasih, "ok", emoji -> tidak ada kejadian dan tidak ada pertanyaan: {"events": [], "question": null}.
+- PERTANYAAN tentang pembukuan -> tidak ada kejadian, isi question: "sisa kaos berapa?" -> {"kind": "stock_left", "item_name": "kaos"}; "hari ini terjual berapa?" -> {"kind": "totals", "period": "today", "about": null}; "minggu ini habis berapa untuk bensin?" -> {"kind": "totals", "period": "week", "about": "bensin"}. Period: "today", "week" atau "month".
 - note: hanya informasi bisnis tanpa uang atau stok ("hari ini sepi, hujan").
 
 Angka:
@@ -84,7 +86,7 @@ Contoh:
 "bayar bensin 50rb" -> expense bensin, amount_major 50000
 "jual 2 krat aqua 45rb per krat" -> sale aqua, quantity 2, unit "krat", unit_price_major 45000
 "5 susu basi" -> stock_update susu, delta -5
-"terima kasih" -> {"events": []}
+"terima kasih" -> {"events": [], "question": null}
 
 Balas HANYA dengan JSON yang sesuai skema yang diberikan, tanpa teks lain."#;
 

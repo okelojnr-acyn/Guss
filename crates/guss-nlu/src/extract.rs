@@ -105,7 +105,10 @@ impl<P: LlmProvider> Nlu<P> {
 
             match serde_json::from_value::<ExtractedEvents>(value.clone()) {
                 Ok(dto) => {
-                    let mut out = Extraction::default();
+                    let mut out = Extraction {
+                        question: dto.question,
+                        ..Extraction::default()
+                    };
                     for e in dto.events {
                         match to_business_event(
                             e,
@@ -147,6 +150,8 @@ impl<P: LlmProvider> Nlu<P> {
 pub struct Extraction {
     pub events: Vec<BusinessEvent>,
     pub issues: Vec<Issue>,
+    /// The message asked something instead (answered, never stored).
+    pub question: Option<crate::dto::Question>,
 }
 
 /// Something in a message that Guss must not guess at.

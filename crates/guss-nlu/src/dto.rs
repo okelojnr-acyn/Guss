@@ -63,4 +63,24 @@ pub enum ExtractedEvent {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ExtractedEvents {
     pub events: Vec<ExtractedEvent>,
+    /// Set when the message ASKS something about the books instead of
+    /// reporting what happened (then events is empty). Null otherwise.
+    #[serde(default)]
+    pub question: Option<Question>,
+}
+
+/// A question Guss answers from its own books (never stored).
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Question {
+    /// "how many tshirts are left?", "sisa beras berapa?"
+    StockLeft { item_name: String },
+    /// "how much did I sell today?", "what did I spend on transport this
+    /// week?": totals for a period, optionally about one item or expense.
+    Totals {
+        /// "today", "week" or "month".
+        period: String,
+        /// The item or expense asked about ("transport", "rice"). Null for everything.
+        about: Option<String>,
+    },
 }

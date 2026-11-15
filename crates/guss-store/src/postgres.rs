@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::people::{Actor, Role};
 use guss_core::store::{
-    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest, Voided,
+    JournalEntry, StockLevel, Store, StoreError, SyncItem, VoidRequest, Voided,
 };
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -561,6 +561,7 @@ mod tests {
     use super::*;
     use guss_core::domain::{BusinessEvent, Sale, SourceChannel, StockUpdate};
     use guss_core::money::CurrencyAmount;
+    use guss_core::store::TimeWindow;
 
     async fn test_store() -> PostgresStore {
         let url = std::env::var("GUSS_TEST_POSTGRES_URL").expect(
