@@ -6,5 +6,5 @@ pub mod voice_support;
 pub mod web;
 pub mod whatsapp;
 
-pub use orchestrator::{Orchestrator, OrchestratorError};
+pub use orchestrator::{Orchestrator, OrchestratorError, OtherCurrencyPolicy};
 pub use voice_support::VoiceSupport;

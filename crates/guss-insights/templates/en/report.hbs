@@ -1,6 +1,8 @@
 Here is your report for {{business_name}}, covering {{window_label}}.
 
 Revenue was {{total_revenue}} and expenses were {{total_expenses}}, for a net of {{net_cash_basis}}.
+{{#if other_currencies}}Also recorded in other currencies (kept separate, not converted): {{#each other_currencies}}revenue {{revenue}}, expenses {{expenses}}, net {{net_cash_basis}}{{#unless @last}}; {{/unless}}{{/each}}.
+{{/if}}
 {{#if gross_margin}}Using your recorded restock costs, estimated gross margin is {{gross_margin}}.
 {{/if}}
 {{#if top_sellers_by_quantity}}Best sellers by quantity: {{#each top_sellers_by_quantity}}{{item_name}} ({{quantity}} sold){{#unless @last}}, {{/unless}}{{/each}}.

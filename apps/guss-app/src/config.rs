@@ -17,6 +17,10 @@ pub struct BusinessConfig {
     pub language: String,
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    /// What to do with an amount in another currency: "ask" (default),
+    /// "business" (record it in `currency`) or "allow".
+    #[serde(default)]
+    pub other_currencies: String,
 }
 
 fn default_language() -> String {

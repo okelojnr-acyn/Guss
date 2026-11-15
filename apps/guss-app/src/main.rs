@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use config::AppConfig;
-use guss_channels::{Orchestrator, VoiceSupport, cli, telegram, web};
+use guss_channels::{Orchestrator, OtherCurrencyPolicy, VoiceSupport, cli, telegram, web};
 use guss_core::domain::BusinessProfile;
 use guss_core::store::Store;
 use guss_llm::OpenAiCompatibleProvider;
@@ -193,7 +193,17 @@ async fn main() {
     let voice = Arc::new(build_voice_support(&config, &business.language));
     let scheduler_store = store.clone();
     let scheduler_business = business.clone();
-    let orchestrator = Arc::new(Orchestrator::new(nlu, store, business));
+    let other_currency_policy = config
+        .business
+        .other_currencies
+        .parse::<OtherCurrencyPolicy>()
+        .unwrap_or_else(|e| {
+            tracing::warn!("{e}; asking before saving other currencies");
+            OtherCurrencyPolicy::Ask
+        });
+    let orchestrator = Arc::new(
+        Orchestrator::new(nlu, store, business).with_other_currency_policy(other_currency_policy),
+    );
 
     match config.web.token.as_deref().map(str::trim) {
         Some(token) if token.len() >= 24 => {

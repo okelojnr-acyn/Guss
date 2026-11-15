@@ -28,12 +28,20 @@ struct MrrLineView {
 }
 
 #[derive(Serialize)]
+struct CurrencyTotalsView {
+    revenue: String,
+    expenses: String,
+    net_cash_basis: String,
+}
+
+#[derive(Serialize)]
 struct RenderContext {
     business_name: String,
     window_label: String,
     total_revenue: String,
     total_expenses: String,
     net_cash_basis: String,
+    other_currencies: Vec<CurrencyTotalsView>,
     gross_margin: Option<String>,
     top_sellers_by_quantity: Vec<ItemStatView>,
     bottom_sellers_by_quantity: Vec<ItemStatView>,
@@ -61,7 +69,12 @@ fn items_view(items: &[crate::aggregate::ItemStat]) -> Vec<ItemStatView> {
         .map(|i| ItemStatView {
             item_name: i.item_name.clone(),
             quantity: i.quantity,
-            revenue: i.revenue.to_string(),
+            revenue: i
+                .revenue
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join(" + "),
         })
         .collect()
 }
@@ -80,9 +93,18 @@ pub fn render_report(data: &ReportData, business_name: &str, language: &str) -> 
     let context = RenderContext {
         business_name: business_name.to_string(),
         window_label: window_label(data.window, lang_key),
-        total_revenue: data.total_revenue.to_string(),
-        total_expenses: data.total_expenses.to_string(),
-        net_cash_basis: data.net_cash_basis.to_string(),
+        total_revenue: data.totals.revenue.to_string(),
+        total_expenses: data.totals.expenses.to_string(),
+        net_cash_basis: data.totals.net_cash_basis.to_string(),
+        other_currencies: data
+            .other_currency_totals
+            .iter()
+            .map(|t| CurrencyTotalsView {
+                revenue: t.revenue.to_string(),
+                expenses: t.expenses.to_string(),
+                net_cash_basis: t.net_cash_basis.to_string(),
+            })
+            .collect(),
         gross_margin: data.gross_margin.as_ref().map(|m| m.to_string()),
         top_sellers_by_quantity: items_view(&data.top_sellers_by_quantity),
         bottom_sellers_by_quantity: items_view(&data.bottom_sellers_by_quantity),
@@ -122,22 +144,30 @@ pub fn render_report(data: &ReportData, business_name: &str, language: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregate::{ItemStat, MrrLine, ReportData};
+    use crate::aggregate::{CurrencyTotals, ItemStat, MrrLine, ReportData};
     use guss_core::money::CurrencyAmount;
     use guss_core::store::StockLevel;
+
+    fn totals(revenue: f64, expenses: f64, currency: &str) -> CurrencyTotals {
+        CurrencyTotals {
+            currency: currency.into(),
+            revenue: CurrencyAmount::new(revenue, currency),
+            expenses: CurrencyAmount::new(expenses, currency),
+            net_cash_basis: CurrencyAmount::new(revenue - expenses, currency),
+        }
+    }
 
     fn sample_report() -> ReportData {
         ReportData {
             window: TimeWindow::Day,
             currency: "USD".into(),
-            total_revenue: CurrencyAmount::new(1500.0, "USD"),
-            total_expenses: CurrencyAmount::new(200.0, "USD"),
-            net_cash_basis: CurrencyAmount::new(1300.0, "USD"),
+            totals: totals(1500.0, 200.0, "USD"),
+            other_currency_totals: vec![],
             gross_margin: Some(CurrencyAmount::new(900.0, "USD")),
             top_sellers_by_quantity: vec![ItemStat {
                 item_name: "rice".into(),
                 quantity: 10.0,
-                revenue: CurrencyAmount::new(500.0, "USD"),
+                revenue: vec![CurrencyAmount::new(500.0, "USD")],
             }],
             bottom_sellers_by_quantity: vec![],
             top_sellers_by_revenue: vec![],
@@ -173,5 +203,26 @@ mod tests {
         assert!(text.contains("1500.00 USD"));
         assert!(text.contains("rice"));
         assert!(text.contains("soap"));
+    }
+
+    #[test]
+    fn other_currencies_get_their_own_line_in_both_languages() {
+        let mut report = sample_report();
+        report.other_currency_totals = vec![totals(50.0, 0.0, "EUR")];
+
+        let en = render_report(&report, "Acme Shop", "en");
+        assert!(en.contains("1500.00 USD"));
+        assert!(en.contains("50.00 EUR"));
+        assert!(en.contains("not converted"));
+
+        let id = render_report(&report, "Toko Acme", "id");
+        assert!(id.contains("50.00 EUR"));
+        assert!(id.contains("tidak dikonversi"));
+    }
+
+    #[test]
+    fn single_currency_report_has_no_other_currency_line() {
+        let en = render_report(&sample_report(), "Acme Shop", "en");
+        assert!(!en.contains("not converted"));
     }
 }
