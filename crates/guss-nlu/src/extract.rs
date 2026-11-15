@@ -107,6 +107,7 @@ impl<P: LlmProvider> Nlu<P> {
                 Ok(dto) => {
                     let mut out = Extraction {
                         question: dto.question,
+                        days_ago: dto.days_ago.filter(|d| *d > 0),
                         ..Extraction::default()
                     };
                     for e in dto.events {
@@ -152,6 +153,9 @@ pub struct Extraction {
     pub issues: Vec<Issue>,
     /// The message asked something instead (answered, never stored).
     pub question: Option<crate::dto::Question>,
+    /// "yesterday" -> 1: the events happened that many days ago (the
+    /// caller dates them in the shop's time zone).
+    pub days_ago: Option<u32>,
 }
 
 /// Something in a message that Guss must not guess at.

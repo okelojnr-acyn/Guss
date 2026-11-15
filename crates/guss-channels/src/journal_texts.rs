@@ -293,3 +293,39 @@ pub fn duplicate_dropped(language: &str) -> String {
         "(The possible double entry was not saved.)".to_string()
     }
 }
+
+pub fn too_far_back(max: u32, language: &str) -> String {
+    if id(language) {
+        format!(
+            "Saya bisa mencatat sampai {max} hari ke belakang. Tidak ada yang disimpan; untuk yang \
+             lebih lama, minta pemilik mencatatnya dengan catatan."
+        )
+    } else {
+        format!(
+            "I can record up to {max} days back. Nothing was saved; for anything older, ask the \
+             owner to record it with a note."
+        )
+    }
+}
+
+pub fn outlier_question(item: &str, price: &str, usual: &str, language: &str) -> String {
+    if id(language) {
+        format!(
+            "{item} biasanya terjual {usual}. Tetap simpan {price} per satuan? Belum ada yang \
+             disimpan. Balas \"ya\" untuk menyimpan, atau kirim lagi dengan harga yang benar."
+        )
+    } else {
+        format!(
+            "{item} usually sells at {usual}. Keep {price} each? Nothing is saved yet. Reply \
+             \"yes\" to keep it, or send it again with the right price."
+        )
+    }
+}
+
+pub fn outlier_dropped(language: &str) -> String {
+    if id(language) {
+        "(Harga yang tidak biasa tadi tidak disimpan.)".to_string()
+    } else {
+        "(The unusual price was not saved.)".to_string()
+    }
+}

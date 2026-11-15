@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use guss_core::domain::{BusinessEvent, BusinessProfile, SourceChannel};
+use guss_core::domain::{BusinessEvent, BusinessProfile, Sale, SourceChannel};
 use guss_core::money::CurrencyAmount;
 use guss_core::people::{Action, Actor};
 use guss_core::store::{JournalEntry, Store, StoreError, TimeWindow};
@@ -81,6 +81,8 @@ enum Question {
     Unit(UnitQuestion),
     /// "Looks like Mary already recorded this a minute ago."
     Duplicate,
+    /// "rice usually sells at 120.00 KES; keep 12000.00 KES each?"
+    Outlier,
 }
 
 #[derive(Debug, Error)]
@@ -264,6 +266,12 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     }
                     dropped_note = Some(currency_dropped_note(&foreign, language));
                 }
+                Question::Outlier => {
+                    if KEEP_WORDS.contains(&trimmed.as_str()) {
+                        return self.commit(actor, conversation_key, h.events).await;
+                    }
+                    dropped_note = Some(texts::outlier_dropped(language));
+                }
                 Question::Duplicate => {
                     if KEEP_WORDS.contains(&trimmed.as_str()) {
                         return self.commit(actor, conversation_key, h.events).await;
@@ -336,7 +344,16 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             // a message recorded is harder to fix than none.
             return Ok(issues_reply(&extraction.issues, language));
         }
-        let events = extraction.events;
+        let mut events = extraction.events;
+        if let Some(days) = extraction.days_ago {
+            if days > MAX_DAYS_BACK {
+                return Ok(texts::too_far_back(MAX_DAYS_BACK, language));
+            }
+            let when = self.days_ago(days);
+            for e in &mut events {
+                set_time(e, when);
+            }
+        }
 
         if events.is_empty() {
             if let Some(q) = extraction.question {
@@ -345,6 +362,27 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             return Ok(no_events_reply(language));
         }
         self.prepare(actor, conversation_key, events, home).await
+    }
+
+    /// Noon, `days` days ago, in the shop's time zone: lands in that day's
+    /// reports whatever the clock time of the message.
+    fn days_ago(&self, days: u32) -> DateTime<Utc> {
+        use chrono::{Days, TimeZone};
+        let tz: chrono_tz::Tz = self
+            .business
+            .timezone
+            .trim()
+            .parse()
+            .unwrap_or(chrono_tz::UTC);
+        let today = Utc::now().with_timezone(&tz).date_naive();
+        let day = today
+            .checked_sub_days(Days::new(days.into()))
+            .unwrap_or(today);
+        let noon = day.and_hms_opt(12, 0, 0).expect("noon exists");
+        tz.from_local_datetime(&noon)
+            .earliest()
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now)
     }
 
     async fn catalog(&self) -> Result<Catalog, OrchestratorError> {
@@ -378,6 +416,11 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             let reply = items::unit_question_text(&q, language);
             self.hold(conversation_key, events, Question::Unit(q)).await;
             return Ok(reply);
+        }
+
+        if let Some(text) = self.unusual_price(&events).await? {
+            self.hold(conversation_key, events, Question::Outlier).await;
+            return Ok(text);
         }
 
         if let Some(line) = self.duplicate_of(actor, &events).await? {
@@ -423,6 +466,54 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     && same_entry(&e.event, event)
             }) {
                 return Ok(Some(self.entry_line(e)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A sale priced far from the item's usual price (over 5x or under a
+    /// fifth, per base unit, same currency, from at least 3 earlier
+    /// sales): usually a typo (12000 for 120).
+    async fn unusual_price(
+        &self,
+        events: &[BusinessEvent],
+    ) -> Result<Option<String>, OrchestratorError> {
+        let language = self.business.language.as_str();
+        let history = self.store.journal(self.business.id, 300).await?;
+        for event in events {
+            let BusinessEvent::Sale(s) = event else {
+                continue;
+            };
+            let per_base = |sale: &Sale| sale.unit_price.major_units() / sale.unit_factor.max(1e-9);
+            let mut usual: Vec<f64> = history
+                .iter()
+                .filter(|e| e.voided.is_none())
+                .filter_map(|e| match &e.event {
+                    BusinessEvent::Sale(old)
+                        if items::normalize_name(&old.item_name)
+                            == items::normalize_name(&s.item_name)
+                            && old.unit_price.currency == s.unit_price.currency =>
+                    {
+                        Some(per_base(old))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if usual.len() < 3 {
+                continue;
+            }
+            usual.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = usual[usual.len() / 2];
+            let price = per_base(s);
+            if median > 0.0 && (price > median * 5.0 || price < median / 5.0) {
+                let usual_price =
+                    CurrencyAmount::new(median * s.unit_factor, s.unit_price.currency.as_str());
+                return Ok(Some(texts::outlier_question(
+                    &s.item_name,
+                    &s.unit_price.to_string(),
+                    &usual_price.to_string(),
+                    language,
+                )));
             }
         }
         Ok(None)
@@ -1029,6 +1120,19 @@ fn same_entry(a: &BusinessEvent, b: &BusinessEvent) -> bool {
             same(&x.description, &y.description) && x.amount == y.amount
         }
         _ => false,
+    }
+}
+
+/// Furthest back "N days ago" may go: older corrections belong in /void
+/// and a fresh entry, so a slip ("300 days ago") can't bury an entry.
+const MAX_DAYS_BACK: u32 = 31;
+
+fn set_time(e: &mut BusinessEvent, when: DateTime<Utc>) {
+    match e {
+        BusinessEvent::Sale(s) => s.occurred_at = when,
+        BusinessEvent::Expense(x) => x.occurred_at = when,
+        BusinessEvent::StockUpdate(su) => su.occurred_at = when,
+        BusinessEvent::Note(n) => n.occurred_at = when,
     }
 }
 
@@ -1714,6 +1818,83 @@ mod tests {
         record_as(&o, &mary).await;
         record_as(&o, &mary).await;
         assert_eq!(saved_sales(&o).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn yesterday_is_dated_in_the_shops_calendar() {
+        let yesterday = json!({"days_ago": 1, "events": [{"kind": "sale", "item_name": "rice", "quantity": 3.0,
+            "unit_price_major": 120.0, "currency": null, "category": null}]});
+        let o = orchestrator(yesterday, "en", OtherCurrencyPolicy::Ask).await;
+        say(&o, "yesterday I sold 3 rice at 120").await;
+        let journal = o.store.journal(o.business.id, 1).await.unwrap();
+        let when = event_time(&journal[0].event);
+        let today = TimeWindow::Day.start_in(Utc::now(), &o.business.timezone);
+        assert!(when < today && when >= today - Duration::days(1), "{when}");
+        // Not in today's figures.
+        let report = o.handle_report(TimeWindow::Day).await.unwrap();
+        assert!(report.contains("Revenue was 0.00 KES"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn too_far_back_saves_nothing() {
+        let old = json!({"days_ago": 400, "events": [{"kind": "sale", "item_name": "rice", "quantity": 3.0,
+            "unit_price_major": 120.0, "currency": null, "category": null}]});
+        let o = orchestrator(old, "en", OtherCurrencyPolicy::Ask).await;
+        let reply = say(&o, "sold rice long ago").await;
+        assert!(reply.contains("up to 31 days back"), "{reply}");
+        assert!(o.store.journal(o.business.id, 5).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_price_far_from_usual_is_asked_about() {
+        let usual = json!({"events": [{"kind": "sale", "item_name": "rice", "quantity": 1.0,
+            "unit_price_major": 120.0, "currency": null, "category": null}]});
+        let typo = json!({"events": [{"kind": "sale", "item_name": "rice", "quantity": 1.0,
+            "unit_price_major": 12000.0, "currency": null, "category": null}]});
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let business = BusinessProfile {
+            id: Uuid::new_v4(),
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+        };
+        let script = Script(std::sync::Mutex::new(vec![
+            usual.clone(),
+            usual.clone(),
+            usual,
+            typo.clone(),
+            typo,
+        ]));
+        let o = Orchestrator::new(Nlu::new(script, "en"), store.clone(), business.clone());
+        let ask = |text: &'static str| o.handle_message("chat", SourceChannel::Telegram, text);
+        let sales = || async {
+            store
+                .list_events(business.id, TimeWindow::Day)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| matches!(e, BusinessEvent::Sale(_)))
+                .count()
+        };
+        for _ in 0..3 {
+            ask("sold rice 120").await.unwrap();
+        }
+        let reply = ask("sold rice 12000").await.unwrap();
+        assert!(
+            reply.starts_with("rice usually sells at 120.00 KES"),
+            "{reply}"
+        );
+        assert_eq!(sales().await, 3);
+        // Anything but yes drops it and handles the new message.
+        let reply = ask("sold rice 12000 again").await.unwrap();
+        assert!(
+            reply.starts_with("(The unusual price was not saved.)"),
+            "{reply}"
+        );
+        let reply = ask("yes").await.unwrap();
+        assert!(reply.starts_with("Sold:"), "{reply}");
+        assert_eq!(sales().await, 4);
     }
 
     #[test]
