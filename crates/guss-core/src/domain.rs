@@ -47,7 +47,16 @@ pub struct Sale {
     pub id: Uuid,
     pub business_id: Uuid,
     pub item_name: String,
+    /// How many, in `unit` (as said: "2 crates" -> 2.0, Some("crate")).
     pub quantity: f64,
+    /// The unit said; None means the item's base unit.
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Base units per `unit` (a crate of 24 bottles -> 24). Stock counts
+    /// `quantity * unit_factor`; money never goes through the factor.
+    #[serde(default = "one")]
+    pub unit_factor: f64,
+    /// Price of one `unit` (one crate, not one bottle).
     pub unit_price: CurrencyAmount,
     pub category: Option<String>,
     pub occurred_at: DateTime<Utc>,
@@ -57,7 +66,16 @@ pub struct Sale {
     pub raw_text: Option<String>,
 }
 
+fn one() -> f64 {
+    1.0
+}
+
 impl Sale {
+    /// Quantity in the item's base unit.
+    pub fn base_quantity(&self) -> f64 {
+        self.quantity * self.unit_factor
+    }
+
     /// Total = quantity * unit price, computed directly in minor units so
     /// fractional quantities (e.g. 1.5 kg) never round-trip through a
     /// string/float conversion.
@@ -93,12 +111,39 @@ pub struct StockUpdate {
     /// Sales are NOT double-counted here - current stock is derived at
     /// query time as SUM(StockUpdate.delta) - SUM(Sale.quantity).
     pub delta: f64,
+    /// The unit said; None means the item's base unit.
     pub unit: Option<String>,
+    /// Base units per `unit`, as for `Sale::unit_factor`.
+    #[serde(default = "one")]
+    pub unit_factor: f64,
+    /// Cost of one `unit`.
     pub unit_cost: Option<CurrencyAmount>,
     pub reorder_threshold: Option<f64>,
     pub occurred_at: DateTime<Utc>,
     pub source_channel: SourceChannel,
     pub raw_text: Option<String>,
+}
+
+impl StockUpdate {
+    /// Change in the item's base unit.
+    pub fn base_delta(&self) -> f64 {
+        self.delta * self.unit_factor
+    }
+}
+
+/// Something the shop sells or stocks, with the units it is counted in.
+/// Names are lower-case and singular; `aliases` catch other names for it
+/// ("mchele" for rice, "tee" for tshirt).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Item {
+    pub name: String,
+    /// What stock is counted in ("bottle"). None until a unit is first used.
+    pub base_unit: Option<String>,
+    /// Other units and how many base units each holds: ("crate", 24.0).
+    #[serde(default)]
+    pub units: Vec<(String, f64)>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,12 +228,30 @@ mod tests {
             business_id: Uuid::new_v4(),
             item_name: "rice".into(),
             quantity,
+            unit: None,
+            unit_factor: 1.0,
             unit_price: CurrencyAmount::new(unit_price, "USD"),
             category: None,
             occurred_at: Utc::now(),
             recurring: None,
             source_channel: SourceChannel::Cli,
             raw_text: None,
+        }
+    }
+
+    #[test]
+    fn events_saved_before_units_still_load_with_factor_one() {
+        let old = r#"{"kind":"Sale","id":"00000000-0000-0000-0000-000000000001",
+            "business_id":"00000000-0000-0000-0000-000000000002","item_name":"rice",
+            "quantity":3.0,"unit_price":{"amount":{"minor_units":12000},"currency":"KES"},
+            "category":null,"occurred_at":"2026-11-14T10:00:00Z","recurring":null,
+            "source_channel":"telegram","raw_text":null}"#;
+        match serde_json::from_str::<BusinessEvent>(old).unwrap() {
+            BusinessEvent::Sale(s) => {
+                assert_eq!(s.unit, None);
+                assert_eq!(s.base_quantity(), 3.0);
+            }
+            other => panic!("{other:?}"),
         }
     }
 

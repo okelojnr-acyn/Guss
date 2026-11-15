@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod items;
 pub mod orchestrator;
 pub mod telegram;
 pub mod telegram_ux;

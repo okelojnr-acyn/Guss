@@ -8,6 +8,8 @@ use guss_core::store::{Store, StoreError, TimeWindow};
 use guss_insights::{build_report, render_report};
 use guss_llm::LlmProvider;
 use guss_nlu::{Nlu, NluError, extract_keywords};
+
+use crate::items::{self, Catalog, UnitQuestion};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -27,7 +29,7 @@ const KEEP_WORDS: &[&str] = &["keep", "yes", "ya", "simpan"];
 
 /// How long a "that's in USD, not your usual KES" question stays open.
 /// After this the held entries are dropped (nothing was saved).
-const CURRENCY_QUESTION_TTL: Duration = Duration::minutes(10);
+const QUESTION_TTL: Duration = Duration::minutes(10);
 
 /// What to do when a message names an amount in a currency other than
 /// the business currency. A wrong currency silently corrupts every total,
@@ -59,11 +61,18 @@ impl std::str::FromStr for OtherCurrencyPolicy {
     }
 }
 
-struct AwaitingCurrency {
+/// Entries held back (nothing saved) until the owner answers a question.
+struct Held {
     events: Vec<BusinessEvent>,
-    /// Upper-case codes of the other currencies in `events`.
-    foreign: Vec<String>,
+    question: Question,
     asked_at: DateTime<Utc>,
+}
+
+enum Question {
+    /// "That's in USD, not your usual KES". Upper-case codes.
+    Currency { foreign: Vec<String> },
+    /// "How many bottles in one crate of soda?"
+    Unit(UnitQuestion),
 }
 
 #[derive(Debug, Error)]
@@ -92,7 +101,7 @@ pub struct Orchestrator<P: LlmProvider, S: Store> {
     business: BusinessProfile,
     pending: Mutex<HashMap<String, PendingCommit>>,
     other_currency_policy: OtherCurrencyPolicy,
-    awaiting_currency: Mutex<HashMap<String, AwaitingCurrency>>,
+    held: Mutex<HashMap<String, Held>>,
 }
 
 impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
@@ -103,7 +112,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             business,
             pending: Mutex::new(HashMap::new()),
             other_currency_policy: OtherCurrencyPolicy::default(),
-            awaiting_currency: Mutex::new(HashMap::new()),
+            held: Mutex::new(HashMap::new()),
         }
     }
 
@@ -128,25 +137,36 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         let language = self.business.language.as_str();
         let home = self.home_currency();
 
-        // An answer to "that's in USD, not your usual KES" comes first.
+        // An answer to a question about held entries comes first.
         let mut dropped_note = None;
-        let awaiting = self.awaiting_currency.lock().await.remove(conversation_key);
-        if let Some(q) = awaiting.filter(|q| Utc::now() - q.asked_at <= CURRENCY_QUESTION_TTL) {
+        let held = self.held.lock().await.remove(conversation_key);
+        if let Some(h) = held.filter(|h| Utc::now() - h.asked_at <= QUESTION_TTL) {
             if UNDO_WORDS.contains(&trimmed.as_str()) {
                 return Ok(currency_cancelled_reply(language));
             }
-            let answer = trimmed.to_uppercase();
-            if q.foreign.contains(&answer) || KEEP_WORDS.contains(&trimmed.as_str()) {
-                return self.commit(conversation_key, q.events).await;
+            match h.question {
+                Question::Currency { foreign } => {
+                    let answer = trimmed.to_uppercase();
+                    if foreign.contains(&answer) || KEEP_WORDS.contains(&trimmed.as_str()) {
+                        return self.commit(conversation_key, h.events).await;
+                    }
+                    if answer == home {
+                        return self
+                            .commit(conversation_key, to_currency(h.events, &home))
+                            .await;
+                    }
+                    dropped_note = Some(currency_dropped_note(&foreign, language));
+                }
+                Question::Unit(q) => {
+                    if let Some(count) = items::parse_count(&trimmed) {
+                        self.learn_unit(&q, count).await?;
+                        return self.prepare(conversation_key, h.events, &home).await;
+                    }
+                    dropped_note = Some(unit_dropped_note(&q.item, language));
+                }
             }
-            if answer == home {
-                return self
-                    .commit(conversation_key, to_currency(q.events, &home))
-                    .await;
-            }
-            // Anything else: the question lapses, nothing from it is saved,
+            // Anything else: the question lapses, nothing held is saved,
             // and this message is handled on its own.
-            dropped_note = Some(currency_dropped_note(&q.foreign, language));
         }
 
         if UNDO_WORDS.contains(&trimmed.as_str()) {
@@ -179,10 +199,13 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             .store
             .search_documents(self.business.id, &keywords, 3)
             .await?;
-        let context_snippets: Vec<String> = context
+        let mut context_snippets: Vec<String> = context
             .into_iter()
             .map(|d| format!("{}: {}", d.title, d.content))
             .collect();
+        if let Some(line) = self.catalog().await?.context_line(language) {
+            context_snippets.push(line);
+        }
 
         let extraction = self
             .nlu
@@ -204,6 +227,40 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         if events.is_empty() {
             return Ok(no_events_reply(language));
         }
+        self.prepare(conversation_key, events, home).await
+    }
+
+    async fn catalog(&self) -> Result<Catalog, OrchestratorError> {
+        Ok(Catalog::new(self.store.list_items(self.business.id).await?))
+    }
+
+    /// Records "one crate of soda = 24 bottles" on the item.
+    async fn learn_unit(&self, q: &UnitQuestion, count: f64) -> Result<(), OrchestratorError> {
+        let catalog = self.catalog().await?;
+        if let Some(item) = catalog.find(&q.item) {
+            let mut item = item.clone();
+            item.units.retain(|(u, _)| u != &q.unit);
+            item.units.push((q.unit.clone(), count));
+            self.store.save_item(self.business.id, &item).await?;
+        }
+        Ok(())
+    }
+
+    /// Items and units, then currency; asks about the first thing it can't
+    /// settle (holding everything), otherwise saves.
+    async fn prepare(
+        &self,
+        conversation_key: &str,
+        mut events: Vec<BusinessEvent>,
+        home: &str,
+    ) -> Result<String, OrchestratorError> {
+        let language = self.business.language.as_str();
+        let catalog = self.catalog().await?;
+        if let Some(q) = items::resolve(&mut events, &catalog) {
+            let reply = items::unit_question_text(&q, language);
+            self.hold(conversation_key, events, Question::Unit(q)).await;
+            return Ok(reply);
+        }
 
         let foreign = foreign_currencies(&events, home);
         if foreign.is_empty() {
@@ -217,17 +274,22 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             }
             OtherCurrencyPolicy::Ask => {
                 let reply = currency_question(&foreign, home, language);
-                self.awaiting_currency.lock().await.insert(
-                    conversation_key.to_string(),
-                    AwaitingCurrency {
-                        events,
-                        foreign,
-                        asked_at: Utc::now(),
-                    },
-                );
+                self.hold(conversation_key, events, Question::Currency { foreign })
+                    .await;
                 Ok(reply)
             }
         }
+    }
+
+    async fn hold(&self, conversation_key: &str, events: Vec<BusinessEvent>, question: Question) {
+        self.held.lock().await.insert(
+            conversation_key.to_string(),
+            Held {
+                events,
+                question,
+                asked_at: Utc::now(),
+            },
+        );
     }
 
     /// Saves events and opens the undo window for them.
@@ -236,6 +298,10 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         conversation_key: &str,
         events: Vec<BusinessEvent>,
     ) -> Result<String, OrchestratorError> {
+        let catalog = self.catalog().await?;
+        for item in items::learn(&events, &catalog) {
+            self.store.save_item(self.business.id, &item).await?;
+        }
         let mut ids = Vec::with_capacity(events.len());
         let mut lines = Vec::with_capacity(events.len());
         for event in &events {
@@ -333,15 +399,10 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
     match event {
         BusinessEvent::Sale(s) => {
             let total = s.total();
+            let what = quantity_text(s.quantity, s.unit.as_deref(), s.unit_factor, &s.item_name);
             match language {
-                "id" => format!(
-                    "Terjual: {} {} seharga {} = {}",
-                    s.quantity, s.item_name, s.unit_price, total
-                ),
-                _ => format!(
-                    "Sold: {} {} at {} = {}",
-                    s.quantity, s.item_name, s.unit_price, total
-                ),
+                "id" => format!("Terjual: {what} seharga {} = {}", s.unit_price, total),
+                _ => format!("Sold: {what} at {} = {}", s.unit_price, total),
             }
         }
         BusinessEvent::Expense(e) => match language {
@@ -373,6 +434,25 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
             "id" => format!("Catatan (tidak dihitung): {}", n.text),
             _ => format!("Note (not counted): {}", n.text),
         },
+    }
+}
+
+/// "3 rice", "2 crate soda (= 48)": the base-unit count only when a
+/// conversion happened, so the owner can check it.
+fn quantity_text(quantity: f64, unit: Option<&str>, factor: f64, item: &str) -> String {
+    match unit {
+        Some(u) if (factor - 1.0).abs() > f64::EPSILON => {
+            format!("{quantity} {u} {item} (= {})", quantity * factor)
+        }
+        Some(u) => format!("{quantity} {u} {item}"),
+        None => format!("{quantity} {item}"),
+    }
+}
+
+fn unit_dropped_note(item: &str, language: &str) -> String {
+    match language {
+        "id" => format!("(Catatan {item} sebelumnya tidak disimpan.)"),
+        _ => format!("(The earlier {item} entry was not saved.)"),
     }
 }
 
@@ -713,6 +793,70 @@ mod tests {
             reply.contains("not counted in sales or expenses"),
             "{reply}"
         );
+    }
+
+    /// Answers each extraction with the next scripted response.
+    struct Script(std::sync::Mutex<Vec<Value>>);
+
+    #[async_trait]
+    impl LlmProvider for Script {
+        async fn complete_json(&self, _req: JsonCompletionRequest) -> Result<Value, LlmError> {
+            Ok(self.0.lock().unwrap().remove(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_unit_is_asked_once_then_remembered() {
+        let restock_bottles = json!({"events": [{"kind": "stock_update", "item_name": "Sodas",
+            "delta": 10.0, "unit": "bottles", "unit_cost_major": null, "total_cost_major": null,
+            "reorder_threshold": null}]});
+        let sold_crates = json!({"events": [{"kind": "sale", "item_name": "soda", "quantity": 2.0,
+            "unit": "crates", "unit_price_major": 1200.0, "total_major": null,
+            "currency": null, "category": null}]});
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let business = BusinessProfile {
+            id: Uuid::new_v4(),
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+        };
+        let script = Script(std::sync::Mutex::new(vec![
+            restock_bottles,
+            sold_crates.clone(),
+            sold_crates,
+        ]));
+        let o = Orchestrator::new(Nlu::new(script, "en"), store.clone(), business.clone());
+        let say = |text: &'static str| o.handle_message("chat", SourceChannel::Telegram, text);
+
+        say("got 10 bottles of soda").await.unwrap();
+        let reply = say("sold 2 crates of soda at 1200").await.unwrap();
+        assert!(
+            reply.starts_with("How many bottle in one crate of soda?"),
+            "{reply}"
+        );
+        assert_eq!(
+            store.current_stock(business.id, "soda").await.unwrap(),
+            10.0
+        );
+
+        let reply = say("24").await.unwrap();
+        assert!(
+            reply.starts_with("Sold: 2 crate soda (= 48) at 1200.00 KES = 2400.00 KES"),
+            "{reply}"
+        );
+        assert_eq!(
+            store.current_stock(business.id, "soda").await.unwrap(),
+            -38.0
+        );
+
+        // Known now: no question the second time.
+        let reply = say("sold 2 crates of soda at 1200").await.unwrap();
+        assert!(reply.starts_with("Sold: 2 crate soda (= 48)"), "{reply}");
+        let items = store.list_items(business.id).await.unwrap();
+        assert_eq!(items[0].name, "soda");
+        assert_eq!(items[0].base_unit.as_deref(), Some("bottle"));
+        assert_eq!(items[0].units, vec![("crate".to_string(), 24.0)]);
     }
 
     #[test]

@@ -26,7 +26,8 @@ Read it like a shopkeeper would:
 - Messages are full of typos, autocorrect and shorthand. Read the obvious meaning: "nought"/"bougth"/"boght" = bought, "sld"/"solf"/"sold" = sold, "fir" = for, "payed" = paid, "recieved" = received, "electricty" = electricity.
 - "3x120", "3@120", "3 at 120", "120 each", "120 per" = 3 at 120 each. "for 360" after a count = 360 for all of them.
 - Numbers: "2k" = 2000, "1.5k" = 1500, "1,500/=" = 1500, "15.000" in Indonesian = 15000. "bob", "ksh", "sh", "/=" mean the shop's own currency (currency null). Only set currency when another one is clearly named ("$50", "50 dollars", "USD").
-- Item names: short, singular, lowercase, without sizes or counts ("T-Shirts" -> "tshirt", "6 coke 500ml" -> "coke").
+- Item names: short, singular, lowercase, without sizes or counts ("T-Shirts" -> "tshirt", "6 coke 500ml" -> "coke"). Use the shop's own item names when they are listed below.
+- Units: the count goes in quantity/delta and the unit it was counted in goes in unit, singular ("2 crates of soda" -> quantity 2, unit "crate"; "1.5 kg sugar" -> quantity 1.5, unit "kg"). A price "per crate" or "a kilo" is the price of one of that unit. Never convert units yourself.
 
 Which event:
 - Sold something -> sale.
@@ -47,6 +48,7 @@ Examples:
 "Bought 30 tshirts 650 each" -> stock_update tshirt, delta 30, unit_cost_major 650
 "restocked 30 shirts for 30 staff at 650 each" -> expense "staff shirts", quantity 30, unit_amount_major 650, amount_major null
 "paid 1.5k for fuel" -> expense fuel, amount_major 1500
+"sold 2 crates of soda at 1200 a crate" -> sale soda, quantity 2, unit "crate", unit_price_major 1200
 "5 milk went bad" -> stock_update milk, delta -5
 "thanks" -> {"events": []}
 
@@ -58,7 +60,8 @@ Bacalah seperti pemilik toko membacanya:
 - Pesan penuh salah ketik, autokoreksi, dan singkatan. Ambil arti yang jelas: "terjaul"/"trjual" = terjual, "beli"/"bli" = beli, "byr" = bayar, "jl" = jual.
 - "3x12000", "3@12000", "3 harga 12000", "12000 per biji" = 3 dengan harga 12000 per satuan. "3 seharga 36000" = 36000 untuk semuanya.
 - Angka: "15.000" = 15000, "15rb" = 15000, "1,5jt" = 1500000, "2k" = 2000. "rb", "ribu", "rp" berarti mata uang toko sendiri (currency null). Isi currency hanya jika mata uang lain disebut jelas ("$50", "50 dolar", "USD").
-- Nama barang: pendek, bentuk tunggal, huruf kecil, tanpa ukuran atau jumlah ("Kopi Sachet" -> "kopi sachet", "6 aqua 600ml" -> "aqua").
+- Nama barang: pendek, bentuk tunggal, huruf kecil, tanpa ukuran atau jumlah ("Kopi Sachet" -> "kopi sachet", "6 aqua 600ml" -> "aqua"). Pakai nama barang toko jika tercantum di bawah.
+- Satuan: jumlahnya di quantity/delta dan satuannya di unit ("2 krat aqua" -> quantity 2, unit "krat"; "1,5 kg gula" -> quantity 1.5, unit "kg"). Harga "per krat" atau "sekilo" adalah harga satu satuan itu. Jangan pernah mengonversi satuan sendiri.
 
 Jenis kejadian:
 - Menjual sesuatu -> sale.
@@ -79,6 +82,7 @@ Contoh:
 "beli 30 kaos 65rb per biji buat dijual" -> stock_update kaos, delta 30, unit_cost_major 65000
 "beli 30 kaos seragam staf 65rb per biji" -> expense "kaos seragam staf", quantity 30, unit_amount_major 65000, amount_major null
 "bayar bensin 50rb" -> expense bensin, amount_major 50000
+"jual 2 krat aqua 45rb per krat" -> sale aqua, quantity 2, unit "krat", unit_price_major 45000
 "5 susu basi" -> stock_update susu, delta -5
 "terima kasih" -> {"events": []}
 

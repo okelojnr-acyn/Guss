@@ -16,9 +16,11 @@ use serde::Deserialize;
 pub enum ExtractedEvent {
     Sale {
         item_name: String,
-        /// How many were sold. 1 if not said.
+        /// How many were sold, in `unit`. 1 if not said.
         quantity: f64,
-        /// Price of ONE unit, as said ("at 120", "120 each", "@120"). Null if not said.
+        /// The unit the quantity is in, as said, singular ("crate", "kg", "bottle"). Null if none was said.
+        unit: Option<String>,
+        /// Price of ONE (one of `unit` if given), as said ("at 120", "120 each", "@120"). Null if not said.
         unit_price_major: Option<f64>,
         /// Price for ALL of them together, as said ("3 for 360"). Null if not said.
         total_major: Option<f64>,

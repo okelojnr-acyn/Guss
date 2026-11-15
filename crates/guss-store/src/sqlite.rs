@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use guss_core::domain::{BusinessEvent, BusinessProfile, Document};
+use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::store::{StockLevel, Store, StoreError, TimeWindow};
 use sqlx::Row;
 use std::str::FromStr;
@@ -16,6 +16,16 @@ pub struct SqliteStore {
 
 fn db_err(e: sqlx::Error) -> StoreError {
     StoreError::Database(e.to_string())
+}
+
+fn item_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Item, StoreError> {
+    let corrupt = |e: serde_json::Error| StoreError::Database(format!("corrupt item: {e}"));
+    Ok(Item {
+        name: row.get("name"),
+        base_unit: row.get("base_unit"),
+        units: serde_json::from_str(&row.get::<String, _>("units")).map_err(corrupt)?,
+        aliases: serde_json::from_str(&row.get::<String, _>("aliases")).map_err(corrupt)?,
+    })
 }
 
 impl SqliteStore {
@@ -70,10 +80,10 @@ impl Store for SqliteStore {
         sqlx::query(
             r#"
             INSERT INTO events (
-                id, business_id, kind, occurred_at, item_name, quantity, delta, unit,
+                id, business_id, kind, occurred_at, item_name, quantity, delta, unit, unit_factor,
                 amount_minor, currency, category, description, reorder_threshold,
                 recurring_interval, recurring_label, source_channel, raw_text, payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(c.id)
@@ -84,6 +94,7 @@ impl Store for SqliteStore {
         .bind(c.quantity)
         .bind(c.delta)
         .bind(c.unit)
+        .bind(c.unit_factor)
         .bind(c.amount_minor)
         .bind(c.currency)
         .bind(c.category)
@@ -137,9 +148,9 @@ impl Store for SqliteStore {
         let row = sqlx::query(
             r#"
             SELECT
-                COALESCE((SELECT SUM(delta) FROM events WHERE business_id = ? AND kind = 'stock_update' AND item_name = ?), 0.0)
+                COALESCE((SELECT SUM(delta * unit_factor) FROM events WHERE business_id = ? AND kind = 'stock_update' AND item_name = ?), 0.0)
                 -
-                COALESCE((SELECT SUM(quantity) FROM events WHERE business_id = ? AND kind = 'sale' AND item_name = ?), 0.0)
+                COALESCE((SELECT SUM(quantity * unit_factor) FROM events WHERE business_id = ? AND kind = 'sale' AND item_name = ?), 0.0)
                 AS stock
             "#,
         )
@@ -170,8 +181,8 @@ impl Store for SqliteStore {
             ),
             stock AS (
                 SELECT item_name,
-                    COALESCE(SUM(CASE WHEN kind = 'stock_update' THEN delta ELSE 0 END), 0.0)
-                    - COALESCE(SUM(CASE WHEN kind = 'sale' THEN quantity ELSE 0 END), 0.0) AS current_quantity
+                    COALESCE(SUM(CASE WHEN kind = 'stock_update' THEN delta * unit_factor ELSE 0 END), 0.0)
+                    - COALESCE(SUM(CASE WHEN kind = 'sale' THEN quantity * unit_factor ELSE 0 END), 0.0) AS current_quantity
                 FROM events
                 WHERE business_id = ? AND item_name IS NOT NULL
                 GROUP BY item_name
@@ -268,6 +279,39 @@ impl Store for SqliteStore {
             .collect()
     }
 
+    async fn save_item(&self, business_id: Uuid, item: &Item) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO items (business_id, name, base_unit, units, aliases)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(business_id, name) DO UPDATE SET
+                base_unit = excluded.base_unit,
+                units = excluded.units,
+                aliases = excluded.aliases
+            "#,
+        )
+        .bind(business_id.to_string())
+        .bind(&item.name)
+        .bind(&item.base_unit)
+        .bind(serde_json::to_string(&item.units).expect("units serialize"))
+        .bind(serde_json::to_string(&item.aliases).expect("aliases serialize"))
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_items(&self, business_id: Uuid) -> Result<Vec<Item>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT name, base_unit, units, aliases FROM items WHERE business_id = ? ORDER BY name",
+        )
+        .bind(business_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter().map(item_from_row).collect()
+    }
+
     async fn save_business_profile(&self, profile: &BusinessProfile) -> Result<(), StoreError> {
         sqlx::query(
             r#"
@@ -344,6 +388,8 @@ mod tests {
             business_id,
             item_name: item.into(),
             quantity: qty,
+            unit: None,
+            unit_factor: 1.0,
             unit_price: CurrencyAmount::new(price, "USD"),
             category: None,
             occurred_at: Utc::now(),
@@ -360,12 +406,51 @@ mod tests {
             item_name: item.into(),
             delta,
             unit: Some("bags".into()),
+            unit_factor: 1.0,
             unit_cost: None,
             reorder_threshold: threshold,
             occurred_at: Utc::now(),
             source_channel: SourceChannel::Cli,
             raw_text: None,
         })
+    }
+
+    #[tokio::test]
+    async fn stock_is_counted_in_base_units() {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        let business_id = Uuid::new_v4();
+        // 2 crates of 24 in, 5 bottles out.
+        let mut crates = restock(business_id, "soda", 2.0, None);
+        if let BusinessEvent::StockUpdate(su) = &mut crates {
+            su.unit = Some("crate".into());
+            su.unit_factor = 24.0;
+        }
+        store.save_event(&crates).await.unwrap();
+        store
+            .save_event(&sale(business_id, "soda", 5.0, 80.0))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.current_stock(business_id, "soda").await.unwrap(),
+            43.0
+        );
+    }
+
+    #[tokio::test]
+    async fn items_round_trip_and_update_in_place() {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        let business_id = Uuid::new_v4();
+        let mut soda = Item {
+            name: "soda".into(),
+            base_unit: Some("bottle".into()),
+            units: vec![("crate".into(), 24.0)],
+            aliases: vec!["coke".into()],
+        };
+        store.save_item(business_id, &soda).await.unwrap();
+        soda.units.push(("six-pack".into(), 6.0));
+        store.save_item(business_id, &soda).await.unwrap();
+        assert_eq!(store.list_items(business_id).await.unwrap(), vec![soda]);
+        assert!(store.list_items(Uuid::new_v4()).await.unwrap().is_empty());
     }
 
     #[tokio::test]

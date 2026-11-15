@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use guss_core::domain::{BusinessEvent, BusinessProfile, Document};
+use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::store::{StockLevel, Store, StoreError, TimeWindow};
 use uuid::Uuid;
 
@@ -112,6 +112,22 @@ impl Store for AnyStore {
             AnyStore::Sqlite(s) => s.search_documents(business_id, terms, limit).await,
             #[cfg(feature = "postgres")]
             AnyStore::Postgres(s) => s.search_documents(business_id, terms, limit).await,
+        }
+    }
+
+    async fn save_item(&self, business_id: Uuid, item: &Item) -> Result<(), StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.save_item(business_id, item).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.save_item(business_id, item).await,
+        }
+    }
+
+    async fn list_items(&self, business_id: Uuid) -> Result<Vec<Item>, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.list_items(business_id).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.list_items(business_id).await,
         }
     }
 

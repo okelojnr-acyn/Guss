@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::domain::{BusinessEvent, BusinessProfile, Document};
+use crate::domain::{BusinessEvent, BusinessProfile, Document, Item};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -63,6 +63,10 @@ pub trait Store: Send + Sync {
         terms: &[String],
         limit: i64,
     ) -> Result<Vec<Document>, StoreError>;
+
+    /// The shop's items and their units (insert or replace by name).
+    async fn save_item(&self, business_id: Uuid, item: &Item) -> Result<(), StoreError>;
+    async fn list_items(&self, business_id: Uuid) -> Result<Vec<Item>, StoreError>;
 
     async fn save_business_profile(&self, profile: &BusinessProfile) -> Result<(), StoreError>;
     async fn load_business_profile(&self) -> Result<Option<BusinessProfile>, StoreError>;

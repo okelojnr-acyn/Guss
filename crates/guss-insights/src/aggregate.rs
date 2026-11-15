@@ -124,16 +124,17 @@ pub fn compute_report(
                 let revenue_minor = total.amount.minor_units;
                 totals.entry(ccy.clone()).or_default().0 += revenue_minor;
 
-                *qty_by_item.entry(sale.item_name.clone()).or_insert(0.0) += sale.quantity;
+                // Quantities in the item's base unit (2 crates of 24 = 48).
+                *qty_by_item.entry(sale.item_name.clone()).or_insert(0.0) += sale.base_quantity();
                 let entry = sales_by_item_ccy
                     .entry((sale.item_name.clone(), ccy.clone()))
                     .or_insert((0.0, 0));
-                entry.0 += sale.quantity;
+                entry.0 += sale.base_quantity();
                 entry.1 += revenue_minor;
 
                 *stock_delta_by_item
                     .entry(sale.item_name.clone())
-                    .or_insert(0.0) -= sale.quantity;
+                    .or_insert(0.0) -= sale.base_quantity();
 
                 if let Some(r) = &sale.recurring {
                     let major = amount(revenue_minor, &ccy).major_units();
@@ -156,7 +157,7 @@ pub fn compute_report(
             BusinessEvent::StockUpdate(su) => {
                 *stock_delta_by_item
                     .entry(su.item_name.clone())
-                    .or_insert(0.0) += su.delta;
+                    .or_insert(0.0) += su.base_delta();
                 if su.reorder_threshold.is_some() {
                     threshold_ever_set.insert(su.item_name.clone(), true);
                 }
@@ -174,8 +175,9 @@ pub fn compute_report(
                     let entry = restock_cost_weighted
                         .entry(su.item_name.clone())
                         .or_insert((0.0, 0.0));
+                    // Cost per base unit, weighted by base units bought.
                     entry.0 += su.delta * cost.major_units();
-                    entry.1 += su.delta;
+                    entry.1 += su.base_delta();
                 }
             }
             BusinessEvent::Note(_) => {}
@@ -326,6 +328,8 @@ mod tests {
             business_id: Uuid::new_v4(),
             item_name: item.into(),
             quantity: qty,
+            unit: None,
+            unit_factor: 1.0,
             unit_price: CurrencyAmount::new(price, currency),
             category: None,
             occurred_at: Utc::now(),
@@ -366,6 +370,7 @@ mod tests {
             item_name: item.into(),
             delta,
             unit: None,
+            unit_factor: 1.0,
             unit_cost: unit_cost.map(|c| CurrencyAmount::new(c, currency)),
             reorder_threshold: threshold,
             occurred_at: Utc::now(),

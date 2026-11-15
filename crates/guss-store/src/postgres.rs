@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use guss_core::domain::{BusinessEvent, BusinessProfile, Document};
+use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::store::{StockLevel, Store, StoreError, TimeWindow};
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -14,6 +14,16 @@ pub struct PostgresStore {
 
 fn db_err(e: sqlx::Error) -> StoreError {
     StoreError::Database(e.to_string())
+}
+
+fn item_from_row(row: sqlx::postgres::PgRow) -> Result<Item, StoreError> {
+    let corrupt = |e: serde_json::Error| StoreError::Database(format!("corrupt item: {e}"));
+    Ok(Item {
+        name: row.get("name"),
+        base_unit: row.get("base_unit"),
+        units: serde_json::from_str(&row.get::<String, _>("units")).map_err(corrupt)?,
+        aliases: serde_json::from_str(&row.get::<String, _>("aliases")).map_err(corrupt)?,
+    })
 }
 
 impl PostgresStore {
@@ -40,10 +50,10 @@ impl Store for PostgresStore {
         sqlx::query(
             r#"
             INSERT INTO events (
-                id, business_id, kind, occurred_at, item_name, quantity, delta, unit,
+                id, business_id, kind, occurred_at, item_name, quantity, delta, unit, unit_factor,
                 amount_minor, currency, category, description, reorder_threshold,
                 recurring_interval, recurring_label, source_channel, raw_text, payload
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
             "#,
         )
         .bind(c.id)
@@ -54,6 +64,7 @@ impl Store for PostgresStore {
         .bind(c.quantity)
         .bind(c.delta)
         .bind(c.unit)
+        .bind(c.unit_factor)
         .bind(c.amount_minor)
         .bind(c.currency)
         .bind(c.category)
@@ -107,9 +118,9 @@ impl Store for PostgresStore {
         let row = sqlx::query(
             r#"
             SELECT
-                COALESCE((SELECT SUM(delta) FROM events WHERE business_id = $1 AND kind = 'stock_update' AND item_name = $2), 0.0)
+                COALESCE((SELECT SUM(delta * unit_factor) FROM events WHERE business_id = $1 AND kind = 'stock_update' AND item_name = $2), 0.0)
                 -
-                COALESCE((SELECT SUM(quantity) FROM events WHERE business_id = $1 AND kind = 'sale' AND item_name = $2), 0.0)
+                COALESCE((SELECT SUM(quantity * unit_factor) FROM events WHERE business_id = $1 AND kind = 'sale' AND item_name = $2), 0.0)
                 AS stock
             "#,
         )
@@ -138,8 +149,8 @@ impl Store for PostgresStore {
             ),
             stock AS (
                 SELECT item_name,
-                    COALESCE(SUM(CASE WHEN kind = 'stock_update' THEN delta ELSE 0 END), 0.0)
-                    - COALESCE(SUM(CASE WHEN kind = 'sale' THEN quantity ELSE 0 END), 0.0) AS current_quantity
+                    COALESCE(SUM(CASE WHEN kind = 'stock_update' THEN delta * unit_factor ELSE 0 END), 0.0)
+                    - COALESCE(SUM(CASE WHEN kind = 'sale' THEN quantity * unit_factor ELSE 0 END), 0.0) AS current_quantity
                 FROM events
                 WHERE business_id = $1 AND item_name IS NOT NULL
                 GROUP BY item_name
@@ -234,6 +245,39 @@ impl Store for PostgresStore {
             .collect()
     }
 
+    async fn save_item(&self, business_id: Uuid, item: &Item) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO items (business_id, name, base_unit, units, aliases)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT(business_id, name) DO UPDATE SET
+                base_unit = excluded.base_unit,
+                units = excluded.units,
+                aliases = excluded.aliases
+            "#,
+        )
+        .bind(business_id.to_string())
+        .bind(&item.name)
+        .bind(&item.base_unit)
+        .bind(serde_json::to_string(&item.units).expect("units serialize"))
+        .bind(serde_json::to_string(&item.aliases).expect("aliases serialize"))
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_items(&self, business_id: Uuid) -> Result<Vec<Item>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT name, base_unit, units, aliases FROM items WHERE business_id = $1 ORDER BY name",
+        )
+        .bind(business_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter().map(item_from_row).collect()
+    }
+
     async fn save_business_profile(&self, profile: &BusinessProfile) -> Result<(), StoreError> {
         sqlx::query(
             r#"
@@ -325,6 +369,8 @@ mod tests {
             business_id,
             item_name: item.into(),
             quantity: qty,
+            unit: None,
+            unit_factor: 1.0,
             unit_price: CurrencyAmount::new(price, "USD"),
             category: None,
             occurred_at: Utc::now(),
@@ -341,6 +387,7 @@ mod tests {
             item_name: item.into(),
             delta,
             unit: Some("bags".into()),
+            unit_factor: 1.0,
             unit_cost: None,
             reorder_threshold: threshold,
             occurred_at: Utc::now(),

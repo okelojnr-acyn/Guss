@@ -263,6 +263,7 @@ fn to_business_event(
         ExtractedEvent::Sale {
             item_name,
             quantity,
+            unit,
             unit_price_major,
             total_major,
             currency,
@@ -285,6 +286,8 @@ fn to_business_event(
                 business_id,
                 item_name,
                 quantity,
+                unit,
+                unit_factor: 1.0,
                 unit_price: CurrencyAmount::new(
                     each,
                     currency.unwrap_or_else(|| default_currency.to_string()),
@@ -341,6 +344,7 @@ fn to_business_event(
                 item_name,
                 delta,
                 unit,
+                unit_factor: 1.0,
                 unit_cost: cost.map(|c| CurrencyAmount::new(c, default_currency.to_string())),
                 reorder_threshold,
                 occurred_at: now,
