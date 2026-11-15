@@ -217,6 +217,9 @@ async fn health<P: LlmProvider, S: Store>(
 struct ChatRequest {
     conversation_id: String,
     text: String,
+    /// The Friday person asking (see the module docs); None acts as owner.
+    #[serde(default)]
+    actor: Option<ActorIn>,
 }
 
 async fn chat<P, S>(
@@ -253,9 +256,21 @@ where
             "Guss is busy, try again in a moment",
         );
     };
+    let actor = match req.actor {
+        Some(a) => match a.into_actor() {
+            Some(actor) => actor,
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "actor: friday:<id>, a name, and role owner, manager or staff",
+                );
+            }
+        },
+        None => Actor::owner("web"),
+    };
     match state
         .orchestrator
-        .handle_message(&format!("web:{id}"), SourceChannel::Web, text)
+        .handle_message_as(&actor, &format!("web:{id}"), SourceChannel::Web, text)
         .await
     {
         Ok(reply) => Json(Reply { reply }).into_response(),
@@ -310,6 +325,25 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("authorization", v.parse().unwrap());
         h
+    }
+
+    #[test]
+    fn actors_must_be_friday_people_with_a_known_role() {
+        let actor = |id: &str, role: &str| {
+            ActorIn {
+                id: id.into(),
+                name: "Mary".into(),
+                role: role.into(),
+            }
+            .into_actor()
+        };
+        let mary = actor("friday:u1", "staff").unwrap();
+        assert_eq!((mary.id.as_str(), mary.role), ("friday:u1", Role::Staff));
+        assert_eq!(actor("friday:u2", "manager").unwrap().role, Role::Manager);
+        // No posing as a Telegram user, no made-up roles.
+        assert!(actor("telegram:7", "owner").is_none());
+        assert!(actor("friday:u1", "admin").is_none());
+        assert!(actor("friday:u1", "viewer").is_none());
     }
 
     #[test]
