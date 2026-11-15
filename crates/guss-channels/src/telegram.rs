@@ -338,7 +338,7 @@ where
         return Ok(());
     };
 
-    let reply = orchestrator
+    let reply = match orchestrator
         .handle_inbound_as(
             &actor,
             &conversation_key,
@@ -347,7 +347,15 @@ where
             &text,
         )
         .await
-        .map_err(|e| TelegramError::Api(e.to_string()))?;
+    {
+        Ok(reply) => reply,
+        // Say so instead of going quiet: the person must know nothing was
+        // recorded.
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't handle a Telegram message");
+            Some(e.user_message(&language))
+        }
+    };
 
     let Some(reply_text) = reply else {
         return Ok(()); // redelivered update, already handled

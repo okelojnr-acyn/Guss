@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::people::Actor;
-use guss_core::store::{
-    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest,
-};
+use guss_core::store::{JournalEntry, StockLevel, Store, StoreError, SyncItem, VoidRequest};
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -183,15 +181,15 @@ impl Store for AnyStore {
         }
     }
 
-    async fn list_events(
+    async fn list_events_since(
         &self,
         business_id: Uuid,
-        window: TimeWindow,
+        since: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<BusinessEvent>, StoreError> {
         match self {
-            AnyStore::Sqlite(s) => s.list_events(business_id, window).await,
+            AnyStore::Sqlite(s) => s.list_events_since(business_id, since).await,
             #[cfg(feature = "postgres")]
-            AnyStore::Postgres(s) => s.list_events(business_id, window).await,
+            AnyStore::Postgres(s) => s.list_events_since(business_id, since).await,
         }
     }
 

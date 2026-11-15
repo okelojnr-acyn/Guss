@@ -168,10 +168,8 @@ where
         Ok(reply) => Json(Reply { reply }).into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "web chat failed");
-            error(
-                StatusCode::BAD_GATEWAY,
-                "Guss couldn't answer that right now",
-            )
+            let message = e.user_message(&state.orchestrator.business().language);
+            error(StatusCode::BAD_GATEWAY, &message)
         }
     }
 }
