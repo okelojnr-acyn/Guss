@@ -59,11 +59,14 @@ impl OpenAiCompatibleProvider {
     }
 }
 
-#[async_trait]
-impl LlmProvider for OpenAiCompatibleProvider {
-    async fn complete_json(&self, req: JsonCompletionRequest) -> Result<Value, LlmError> {
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-
+impl OpenAiCompatibleProvider {
+    async fn send(
+        &self,
+        url: &str,
+        req: &JsonCompletionRequest,
+        schema: &Value,
+        strict: bool,
+    ) -> Result<reqwest::Response, LlmError> {
         let body = json!({
             "model": self.model,
             "temperature": req.temperature,
@@ -80,21 +83,81 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 "type": "json_schema",
                 "json_schema": {
                     "name": req.schema_name,
-                    "schema": req.json_schema,
-                    "strict": true,
+                    "schema": schema,
+                    "strict": strict,
                 }
             },
         });
-
-        let mut request = self.client.post(&url).json(&body);
+        let mut request = self.client.post(url).json(&body);
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);
         }
-
-        let response = request
+        request
             .send()
             .await
-            .map_err(|e| LlmError::Request(e.to_string()))?;
+            .map_err(|e| LlmError::Request(e.to_string()))
+    }
+}
+
+/// Rewrites a schemars schema into what OpenAI-style strict mode accepts
+/// (Groq's gpt-oss refused the raw one: `format: "uint32"` on integers).
+/// `format` is kept only on strings, `oneOf` becomes `anyOf`; every object lists all its
+/// properties as required and forbids extras. Optional fields stay
+/// optional because schemars already allows `null` for them.
+pub fn strict_schema(schema: &Value) -> Value {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(map) => {
+                let is_string = match map.get("type") {
+                    Some(Value::String(t)) => t == "string",
+                    Some(Value::Array(ts)) => ts.iter().any(|t| t == "string"),
+                    _ => false,
+                };
+                if !is_string {
+                    map.remove("format");
+                }
+                // Strict mode takes anyOf, not oneOf; for schemars' tagged
+                // enums (one variant per tag) they mean the same.
+                if let Some(variants) = map.remove("oneOf") {
+                    map.insert("anyOf".into(), variants);
+                }
+                if let Some(Value::Object(props)) = map.get("properties") {
+                    let keys: Vec<Value> = props.keys().cloned().map(Value::String).collect();
+                    map.insert("required".into(), Value::Array(keys));
+                    map.insert("additionalProperties".into(), Value::Bool(false));
+                }
+                for child in map.values_mut() {
+                    walk(child);
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    let mut out = schema.clone();
+    walk(&mut out);
+    out
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiCompatibleProvider {
+    async fn complete_json(&self, req: JsonCompletionRequest) -> Result<Value, LlmError> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let schema = strict_schema(&req.json_schema);
+
+        let mut response = self.send(&url, &req, &schema, true).await?;
+        if response.status() == reqwest::StatusCode::BAD_REQUEST {
+            let text = response.text().await.unwrap_or_default();
+            // Providers differ in which JSON Schema keywords strict mode
+            // accepts; rather than failing every message, retry once with
+            // the schema as guidance only (the caller still validates and
+            // retries on a parse failure).
+            if !text.contains("response_format") && !text.contains("schema") {
+                return Err(LlmError::Request(format!("HTTP 400 Bad Request: {text}")));
+            }
+            tracing::warn!(error = %text, "provider rejected the strict schema, retrying non-strict");
+            response = self.send(&url, &req, &schema, false).await?;
+        }
 
         if !response.status().is_success() {
             let status = response.status();
@@ -122,6 +185,35 @@ impl LlmProvider for OpenAiCompatibleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_schema_drops_non_string_format_and_closes_objects() {
+        let raw = json!({
+            "type": "object",
+            "properties": {
+                "quantity": {"type": "integer", "format": "uint32", "minimum": 0},
+                "note": {"type": ["string", "null"], "format": "date"},
+                "items": {"type": "array", "items": {"type": "object", "properties": {"n": {"type": "number", "format": "double"}}}}
+            },
+            "required": ["quantity"]
+        });
+        let s = strict_schema(&raw);
+        assert!(s["properties"]["quantity"].get("format").is_none());
+        assert_eq!(s["properties"]["note"]["format"], "date");
+        assert!(
+            s["properties"]["items"]["items"]["properties"]["n"]
+                .get("format")
+                .is_none()
+        );
+        assert_eq!(s["additionalProperties"], false);
+        assert_eq!(s["required"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            s["properties"]["items"]["items"]["additionalProperties"],
+            false
+        );
+        let union = strict_schema(&json!({"oneOf": [{"type": "object", "properties": {}}]}));
+        assert!(union.get("oneOf").is_none() && union["anyOf"].is_array());
+    }
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
