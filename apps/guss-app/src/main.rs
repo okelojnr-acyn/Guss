@@ -25,6 +25,9 @@ struct Args {
 enum Command {
     /// Interactive setup wizard - prints a .env file to stdout
     Init,
+    /// Writes a consistent copy of the database to stdout (nightly
+    /// backups: Friday Host stores it). Nothing else goes to stdout.
+    Backup,
 }
 
 #[cfg(feature = "local-whisper")]
@@ -101,6 +104,32 @@ async fn main() {
             Ok(env) => print!("{env}"),
             Err(e) => {
                 eprintln!("guss init failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if matches!(args.command, Some(Command::Backup)) {
+        use std::io::Write;
+        let result = async {
+            let config = AppConfig::load().map_err(|e| e.to_string())?;
+            let store = guss_store::AnyStore::connect(&config.store.url)
+                .await
+                .map_err(|e| e.to_string())?;
+            store.snapshot().await.map_err(|e| e.to_string())
+        }
+        .await;
+        match result {
+            Ok(bytes) => {
+                let mut out = std::io::stdout().lock();
+                if let Err(e) = out.write_all(&bytes).and_then(|_| out.flush()) {
+                    eprintln!("guss backup failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("guss backup failed: {e}");
                 std::process::exit(1);
             }
         }

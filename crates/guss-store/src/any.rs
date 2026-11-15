@@ -23,6 +23,18 @@ pub enum AnyStore {
 }
 
 impl AnyStore {
+    /// A consistent copy of the whole database, for backups. SQLite only:
+    /// a Postgres store is backed up with the database itself.
+    pub async fn snapshot(&self) -> Result<Vec<u8>, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.snapshot().await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(_) => Err(StoreError::Database(
+                "a Postgres store is backed up with its database, not by Guss".into(),
+            )),
+        }
+    }
+
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         if url.starts_with("sqlite:") {
             return Ok(AnyStore::Sqlite(SqliteStore::connect(url).await?));

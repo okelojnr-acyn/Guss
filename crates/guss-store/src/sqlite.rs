@@ -99,6 +99,21 @@ impl SqliteStore {
         Ok(Self { pool })
     }
 
+    /// A consistent copy of the whole database (SQLite `VACUUM INTO`),
+    /// safe to take while Guss is running. Used for nightly backups.
+    pub async fn snapshot(&self) -> Result<Vec<u8>, StoreError> {
+        let path = std::env::temp_dir().join(format!("guss-snapshot-{}.db", Uuid::new_v4()));
+        let path_str = path.to_string_lossy().to_string();
+        sqlx::query("VACUUM INTO ?")
+            .bind(&path_str)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        let bytes = std::fs::read(&path).map_err(|e| StoreError::Database(e.to_string()));
+        std::fs::remove_file(&path).ok();
+        bytes
+    }
+
     #[cfg(test)]
     pub async fn connect_in_memory() -> Result<Self, StoreError> {
         Self::connect("sqlite::memory:").await
@@ -793,6 +808,33 @@ mod tests {
         store.void_event(event_id, &mary, "again").await.unwrap();
         let journal = store.journal(business_id, 10).await.unwrap();
         assert_eq!(journal[0].voided.as_ref().unwrap().by, "Boss");
+    }
+
+    #[tokio::test]
+    async fn snapshot_is_a_complete_database() {
+        let dir = std::env::temp_dir().join(format!("guss-snap-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SqliteStore::connect(&format!("sqlite://{}", dir.join("live.db").display()))
+            .await
+            .unwrap();
+        let business_id = Uuid::new_v4();
+        store
+            .save_event(&restock(business_id, "rice", 7.0, None))
+            .await
+            .unwrap();
+
+        let bytes = store.snapshot().await.unwrap();
+        assert!(bytes.starts_with(b"SQLite format 3"));
+        let copy = dir.join("copy.db");
+        std::fs::write(&copy, &bytes).unwrap();
+        let restored = SqliteStore::connect(&format!("sqlite://{}", copy.display()))
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.current_stock(business_id, "rice").await.unwrap(),
+            7.0
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
