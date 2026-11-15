@@ -45,3 +45,10 @@
 {"id":"lang-id-basic","category":"language","lang":"id","currency":"IDR","text":"jual 3 kopi 5000, bayar listrik 100000","events":[{"kind":"sale","item":"kopi","qty":3,"unit_price":5000},{"kind":"expense","amount":100000}]}
 {"id":"units-crate","category":"units","lang":"en","text":"bought 2 crates of soda at 1200 a crate","events":[{"kind":"stock","item":"soda","delta":2,"unit_cost":1200}],"money_out":2400}
 {"id":"units-kg","category":"units","lang":"en","text":"sold 2kg sugar at 150 per kg","events":[{"kind":"sale","item":"sugar","qty":2,"unit_price":150}],"money_in":300}
+{"id":"sw-sold-rice","category":"language","lang":"en","text":"nimeuza mchele tatu kwa 120","events":[{"kind":"sale","item":"rice","qty":3,"unit_price":120}],"money_in":360}
+{"id":"sw-paid-fare","category":"language","lang":"en","text":"nimelipa nauli 200","events":[{"kind":"expense","amount":200}]}
+{"id":"sw-spoiled","category":"language","lang":"en","text":"maziwa tano zimeharibika","events":[{"kind":"stock","item":"milk","delta":-5}],"money_out":0}
+{"id":"sw-numbers-words","category":"language","lang":"en","text":"nimeuza sukari mbili kwa mia mbili","events":[{"kind":"sale","item":"sugar","qty":2,"unit_price":200}]}
+{"id":"sw-elfu","category":"language","lang":"en","text":"nimelipa kodi elfu tano","events":[{"kind":"expense","amount":5000}]}
+{"id":"sw-sheng-mixed","category":"language","lang":"en","text":"tumeuza 4 mkate @60 bob","events":[{"kind":"sale","item":"bread","qty":4,"unit_price":60}]}
+{"id":"sw-bought-stock","category":"language","lang":"en","text":"nimenunua unga 10 kwa 150 kila moja","events":[{"kind":"stock","item":"flour","delta":10,"unit_cost":150}],"money_out":1500}

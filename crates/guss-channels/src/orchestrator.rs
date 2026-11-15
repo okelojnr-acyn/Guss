@@ -1710,8 +1710,10 @@ mod tests {
         assert_eq!(saved_sales(&o).await.len(), 2);
 
         // The same person saying it twice is not asked (they meant it).
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
         record_as(&o, &mary).await;
-        assert_eq!(saved_sales(&o).await.len(), 3);
+        record_as(&o, &mary).await;
+        assert_eq!(saved_sales(&o).await.len(), 2);
     }
 
     #[test]
