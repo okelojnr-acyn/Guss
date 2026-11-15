@@ -69,12 +69,19 @@ jobs:
   whisper-e2e:
     name: Local Whisper (real audio sample)
     runs-on: ubuntu-latest
+    env:
+      # Build whisper.cpp for a generic x86-64 CPU. The default (native)
+      # build carried the build runner's CPU features into the cache and
+      # died with SIGILL on runners that lack them, blocking every publish.
+      GGML_NATIVE: "OFF"
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: whisper-portable
 
       # whisper-rs-sys compiles whisper.cpp (C++) via CMake as part of the
       # Rust build - this is the real, unavoidable prerequisite documented in
