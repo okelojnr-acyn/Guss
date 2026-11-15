@@ -95,6 +95,18 @@ pub enum OrchestratorError {
     VoiceNotConfigured(String),
 }
 
+/// One waiting void request, for Friday's approvals list.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingVoid {
+    pub number: i64,
+    pub entry_number: i64,
+    /// The entry as /history shows it.
+    pub entry: String,
+    pub requested_by: String,
+    pub reason: String,
+    pub requested_at: DateTime<Utc>,
+}
+
 /// A reply plus messages for other people (delivered by the channel).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
@@ -738,6 +750,27 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 language,
             ))],
         })
+    }
+
+    /// Void requests waiting for a decision, with the entry each is about
+    /// (for Friday's approvals list).
+    pub async fn pending_void_list(&self) -> Result<Vec<PendingVoid>, OrchestratorError> {
+        let mut out = Vec::new();
+        for r in self.store.pending_void_requests(self.business.id).await? {
+            let entry = match self.store.journal_entry(self.business.id, r.entry).await? {
+                Some(e) => self.entry_line(&e),
+                None => format!("#{}", r.entry),
+            };
+            out.push(PendingVoid {
+                number: r.number,
+                entry_number: r.entry,
+                entry,
+                requested_by: r.requested_by,
+                reason: r.reason,
+                requested_at: r.requested_at,
+            });
+        }
+        Ok(out)
     }
 
     /// Void requests waiting for a decision (owner and managers only).
