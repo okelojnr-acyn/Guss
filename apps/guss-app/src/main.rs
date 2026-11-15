@@ -237,15 +237,15 @@ async fn main() {
     ) {
         (Some(url), Some(key)) => {
             let client = Arc::new(guss_channels::friday::FridayClient::new(url, key));
-            let (sync_client, sync_store, business_id) =
-                (client.clone(), store.clone(), business.id);
+            let (sync_client, sync_store, sync_business) =
+                (client.clone(), store.clone(), business.clone());
             tokio::spawn(async move {
-                guss_channels::friday_sync::run(sync_store.as_ref(), &sync_client, business_id)
+                guss_channels::friday_sync::run(sync_store.as_ref(), &sync_client, sync_business)
                     .await;
             });
             tracing::info!(
                 url,
-                "connected to Friday: roles from Friday, entries sent to Inventory"
+                "connected to Friday: roles from Friday, entries sent to Inventory and Accounting"
             );
             Some(client)
         }
