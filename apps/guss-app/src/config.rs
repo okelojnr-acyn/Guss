@@ -145,6 +145,7 @@ pub struct ChannelConfig {
     pub telegram_owner_chat_id: Option<i64>,
     /// Other Telegram user ids allowed to use the bot, comma-separated
     /// (staff). With this or the owner set, everyone else is refused.
+    #[serde(default, deserialize_with = "ids_as_text")]
     pub telegram_allowed_user_ids: Option<String>,
     pub whatsapp_owner_phone_number: Option<String>,
     #[serde(default)]
@@ -297,6 +298,73 @@ mod tests {
 
             let config = AppConfig::load().expect("config should load");
             assert_eq!(config.llm.model, "mixtral");
+            Ok(())
+        });
+    }
+}
+
+/// Figment types env values by their look: a single id like "8359951717"
+/// arrives as a number, "1,2" as text, "[1,2]" as a list. Accept all of
+/// them as the comma-separated text the Telegram channel parses.
+fn ids_as_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum One {
+        Text(String),
+        Unsigned(u64),
+        Signed(i64),
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        One(One),
+        Many(Vec<One>),
+    }
+    fn text(one: One) -> String {
+        match one {
+            One::Text(s) => s,
+            One::Unsigned(n) => n.to_string(),
+            One::Signed(n) => n.to_string(),
+        }
+    }
+    Ok(
+        Option::<Raw>::deserialize(deserializer)?.map(|raw| match raw {
+            Raw::One(one) => text(one),
+            Raw::Many(list) => list.into_iter().map(text).collect::<Vec<_>>().join(","),
+        }),
+    )
+}
+
+#[cfg(test)]
+mod allowed_ids_tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Holder {
+        #[serde(default, deserialize_with = "ids_as_text")]
+        ids: Option<String>,
+    }
+
+    #[test]
+    fn single_number_list_and_text_all_load() {
+        for (raw, want) in [
+            ("8359951717", "8359951717"),
+            ("8359951717,42", "8359951717,42"),
+            ("[8359951717, 42]", "8359951717,42"),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("GUSSTEST_IDS", raw);
+                let h: Holder = Figment::new().merge(Env::prefixed("GUSSTEST_")).extract()?;
+                assert_eq!(h.ids.as_deref(), Some(want), "env {raw}");
+                Ok(())
+            });
+        }
+        figment::Jail::expect_with(|_| {
+            let h: Holder = Figment::new().merge(Env::prefixed("GUSSTEST_")).extract()?;
+            assert!(h.ids.is_none());
             Ok(())
         });
     }
