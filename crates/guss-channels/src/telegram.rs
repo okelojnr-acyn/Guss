@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use guss_core::domain::SourceChannel;
@@ -6,6 +7,7 @@ use guss_core::store::Store;
 use guss_llm::LlmProvider;
 use guss_scheduler::ReportSink;
 use guss_voice::AudioFormat;
+use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, UpdateKind};
 use thiserror::Error;
@@ -26,7 +28,7 @@ pub struct TelegramReportSink {
 impl TelegramReportSink {
     pub fn new(bot_token: &str, chat_id: i64) -> Self {
         Self {
-            bot: Bot::new(bot_token),
+            bot: new_bot(bot_token),
             chat_id: ChatId(chat_id),
         }
     }
@@ -58,6 +60,30 @@ const MAX_CONCURRENT_MESSAGES: usize = 8;
 /// capped at `MAX_CONCURRENT_MESSAGES` concurrent tasks via a semaphore
 /// acquired before each spawn, so a burst of messages can't spawn
 /// unboundedly many tasks.
+const LONG_POLL_SECS: u32 = 30;
+
+// teloxide's default client gives up after 17 s, shorter than the 30 s
+// long poll: with a valid token every quiet poll timed out and Guss
+// exited and restarted every ~18 s. The client must outlast the poll.
+fn new_bot(token: &str) -> Bot {
+    let client = teloxide::net::default_reqwest_settings()
+        .timeout(Duration::from_secs(u64::from(LONG_POLL_SECS) + 15))
+        .build()
+        .expect("reqwest client builds with static settings");
+    Bot::with_client(token, client)
+}
+
+fn is_transient(e: &RequestError) -> bool {
+    matches!(
+        e,
+        RequestError::Network(_) | RequestError::Io(_) | RequestError::RetryAfter(_)
+    )
+}
+
+fn backoff(failures: u32) -> Duration {
+    Duration::from_secs(2u64.saturating_pow(failures.min(5)).min(30))
+}
+
 pub async fn run<P, S>(
     orchestrator: Arc<Orchestrator<P, S>>,
     voice: Arc<VoiceSupport>,
@@ -67,20 +93,36 @@ where
     P: LlmProvider + Send + Sync + 'static,
     S: Store + Send + Sync + 'static,
 {
-    let bot = Bot::new(bot_token);
+    let bot = new_bot(bot_token);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_MESSAGES));
     let mut tasks = JoinSet::new();
     let mut offset: i32 = 0;
 
     tracing::info!("Telegram channel starting (long polling)");
 
+    let mut failures: u32 = 0;
     loop {
-        let updates = bot
+        let updates = match bot
             .get_updates()
             .offset(offset)
-            .timeout(30)
+            .timeout(LONG_POLL_SECS)
             .await
-            .map_err(|e| TelegramError::Api(e.to_string()))?;
+        {
+            Ok(updates) => {
+                failures = 0;
+                updates
+            }
+            Err(e) if is_transient(&e) => {
+                failures += 1;
+                let wait = backoff(failures);
+                tracing::warn!(error = %e, retry_in_secs = wait.as_secs(), "Telegram unreachable, retrying");
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            // A wrong token and other API refusals stay fatal, so a bad
+            // setting shows up at startup instead of being retried forever.
+            Err(e) => return Err(TelegramError::Api(e.to_string())),
+        };
 
         for update in updates {
             offset = offset.max(update.id.0 as i32 + 1);
@@ -303,5 +345,17 @@ mod tests {
             .unwrap();
 
         server.verify().await;
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        assert_eq!(backoff(1), Duration::from_secs(2));
+        assert_eq!(backoff(3), Duration::from_secs(8));
+        assert_eq!(backoff(9), Duration::from_secs(30));
     }
 }
