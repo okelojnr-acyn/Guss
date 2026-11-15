@@ -26,6 +26,7 @@ Read it like a shopkeeper would:
 - Messages are full of typos, autocorrect and shorthand. Read the obvious meaning: "nought"/"bougth"/"boght" = bought, "sld"/"solf"/"sold" = sold, "fir" = for, "payed" = paid, "recieved" = received, "electricty" = electricity.
 - "3x120", "3@120", "3 at 120", "120 each", "120 per" = 3 at 120 each. "for 360" after a count = 360 for all of them.
 - Numbers: "2k" = 2000, "1.5k" = 1500, "1,500/=" = 1500, "15.000" in Indonesian = 15000. "bob", "ksh", "sh", "/=" mean the shop's own currency (currency null). Only set currency when another one is clearly named ("$50", "50 dollars", "USD").
+- Swahili and Sheng are common, alone or mixed with English. Verbs: "nimeuza"/"tumeuza"/"kuuza" = sold, "nimenunua"/"kununua"/"nimeleta" = bought, "nimelipa"/"kulipa" = paid, "imeharibika"/"zimeoza" = spoiled, "deni"/"mkopo" = on credit. Numbers: moja 1, mbili 2, tatu 3, nne 4, tano 5, sita 6, saba 7, nane 8, tisa 9, kumi 10, ishirini 20, hamsini 50, mia 100 ("mia mbili" = 200), elfu 1000 ("elfu tatu" = 3000). Money: "bob", "ksh", "shilingi", "/=" = the shop's currency; "kwa 120" = at 120 each when a count was said, "kwa jumla" = in total. Common items: mchele = rice, sukari = sugar, unga = flour, maziwa = milk, mkate = bread, mafuta = cooking oil, chai = tea, sabuni = soap, mayai = egg, nyanya = tomato, vitunguu = onion. Fares and transport: "nauli", "fare". Rent: "kodi". Salary: "mshahara".
 - Item names: short, singular, lowercase, without sizes or counts ("T-Shirts" -> "tshirt", "6 coke 500ml" -> "coke"). Use the shop's own item names when they are listed below.
 - Units: the count goes in quantity/delta and the unit it was counted in goes in unit, singular ("2 crates of soda" -> quantity 2, unit "crate"; "1.5 kg sugar" -> quantity 1.5, unit "kg"). A price "per crate" or "a kilo" is the price of one of that unit. Never convert units yourself.
 
@@ -50,6 +51,9 @@ Examples:
 "restocked 30 shirts for 30 staff at 650 each" -> expense "staff shirts", quantity 30, unit_amount_major 650, amount_major null
 "paid 1.5k for fuel" -> expense fuel, amount_major 1500
 "sold 2 crates of soda at 1200 a crate" -> sale soda, quantity 2, unit "crate", unit_price_major 1200
+"nimeuza mchele tatu kwa 120" -> sale rice, quantity 3, unit_price_major 120
+"nimelipa nauli 200" -> expense fare, amount_major 200
+"maziwa tano zimeharibika" -> stock_update milk, delta -5
 "5 milk went bad" -> stock_update milk, delta -5
 "thanks" -> {"events": [], "question": null}
 
