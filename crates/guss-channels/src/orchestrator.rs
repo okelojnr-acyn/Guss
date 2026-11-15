@@ -550,6 +550,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             self.business.id,
             window,
             &self.business.default_currency,
+            &self.business.timezone,
         )
         .await?;
         Ok(render_report(

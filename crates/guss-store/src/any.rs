@@ -183,15 +183,15 @@ impl Store for AnyStore {
         }
     }
 
-    async fn list_events(
+    async fn list_events_since(
         &self,
         business_id: Uuid,
-        window: TimeWindow,
+        since: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<BusinessEvent>, StoreError> {
         match self {
-            AnyStore::Sqlite(s) => s.list_events(business_id, window).await,
+            AnyStore::Sqlite(s) => s.list_events_since(business_id, since).await,
             #[cfg(feature = "postgres")]
-            AnyStore::Postgres(s) => s.list_events(business_id, window).await,
+            AnyStore::Postgres(s) => s.list_events_since(business_id, since).await,
         }
     }
 

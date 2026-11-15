@@ -57,10 +57,10 @@ struct RenderContext {
 
 fn window_label(window: TimeWindow, language: &str) -> String {
     match (window, language) {
-        (TimeWindow::Day, "id") => "24 jam terakhir".to_string(),
+        (TimeWindow::Day, "id") => "hari ini".to_string(),
         (TimeWindow::Week, "id") => "7 hari terakhir".to_string(),
         (TimeWindow::Month, "id") => "30 hari terakhir".to_string(),
-        (TimeWindow::Day, _) => "the last 24 hours".to_string(),
+        (TimeWindow::Day, _) => "today".to_string(),
         (TimeWindow::Week, _) => "the last 7 days".to_string(),
         (TimeWindow::Month, _) => "the last 30 days".to_string(),
     }

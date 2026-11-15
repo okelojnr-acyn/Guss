@@ -342,12 +342,12 @@ impl Store for SqliteStore {
         row.map(void_request_from_row).transpose()
     }
 
-    async fn list_events(
+    async fn list_events_since(
         &self,
         business_id: Uuid,
-        window: TimeWindow,
+        since: DateTime<Utc>,
     ) -> Result<Vec<BusinessEvent>, StoreError> {
-        let start = window.start(Utc::now()).to_rfc3339();
+        let start = since.to_rfc3339();
         let rows = sqlx::query(
             "SELECT payload FROM events WHERE business_id = ? AND occurred_at >= ? AND voided_at IS NULL ORDER BY occurred_at ASC",
         )

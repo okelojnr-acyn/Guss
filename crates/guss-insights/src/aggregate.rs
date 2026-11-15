@@ -68,13 +68,17 @@ pub struct ReportData {
     pub recurring_expenses: Vec<MrrLine>,
 }
 
+/// `timezone` is the shop's (e.g. "Africa/Nairobi"): "today" is its
+/// calendar day, not the last 24 hours.
 pub async fn build_report<S: Store + ?Sized>(
     store: &S,
     business_id: Uuid,
     window: TimeWindow,
     currency: &str,
+    timezone: &str,
 ) -> Result<ReportData, StoreError> {
-    let events = store.list_events(business_id, window).await?;
+    let since = window.start_in(chrono::Utc::now(), timezone);
+    let events = store.list_events_since(business_id, since).await?;
     let low_stock = store.low_stock_items(business_id).await?;
     Ok(compute_report(&events, low_stock, window, currency))
 }

@@ -135,9 +135,15 @@ async fn run_once<S: Store>(
     sink: &Arc<dyn ReportSink>,
     window: TimeWindow,
 ) -> Result<(), String> {
-    let report = build_report(store, business.id, window, &business.default_currency)
-        .await
-        .map_err(|e| e.to_string())?;
+    let report = build_report(
+        store,
+        business.id,
+        window,
+        &business.default_currency,
+        &business.timezone,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let text = render_report(&report, &business.name, &business.language);
     sink.send_report(text).await
 }

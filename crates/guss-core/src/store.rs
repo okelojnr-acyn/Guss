@@ -22,13 +22,63 @@ pub enum TimeWindow {
 }
 
 impl TimeWindow {
-    /// Inclusive start timestamp for this window ending now, in UTC.
+    /// Rolling start (the last 24 h, 7 or 30 days), in UTC.
     pub fn start(self, now: DateTime<Utc>) -> DateTime<Utc> {
         match self {
             TimeWindow::Day => now - chrono::Duration::days(1),
             TimeWindow::Week => now - chrono::Duration::days(7),
             TimeWindow::Month => now - chrono::Duration::days(30),
         }
+    }
+
+    /// Start in the shop's own calendar: "today" begins at local midnight,
+    /// "week" is today and the 6 days before, "month" today and the 29
+    /// before. An unknown time zone name counts as UTC.
+    pub fn start_in(self, now: DateTime<Utc>, timezone: &str) -> DateTime<Utc> {
+        use chrono::{Days, TimeZone};
+        let tz: chrono_tz::Tz = timezone.trim().parse().unwrap_or(chrono_tz::UTC);
+        let today = now.with_timezone(&tz).date_naive();
+        let back = match self {
+            TimeWindow::Day => 0,
+            TimeWindow::Week => 6,
+            TimeWindow::Month => 29,
+        };
+        let first_day = today.checked_sub_days(Days::new(back)).unwrap_or(today);
+        let midnight = first_day.and_hms_opt(0, 0, 0).expect("midnight exists");
+        // Where midnight doesn't exist or happens twice (DST), take the
+        // earliest instant that day.
+        tz.from_local_datetime(&midnight)
+            .earliest()
+            .unwrap_or_else(|| tz.from_utc_datetime(&midnight))
+            .with_timezone(&Utc)
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn today_starts_at_the_shops_midnight() {
+        // 02:30 in Nairobi (UTC+3) is 23:30 UTC the day before.
+        let now = Utc.with_ymd_and_hms(2026, 11, 14, 23, 30, 0).unwrap();
+        assert_eq!(
+            TimeWindow::Day.start_in(now, "Africa/Nairobi"),
+            Utc.with_ymd_and_hms(2026, 11, 14, 21, 0, 0).unwrap()
+        );
+        assert_eq!(
+            TimeWindow::Day.start_in(now, "UTC"),
+            Utc.with_ymd_and_hms(2026, 11, 14, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            TimeWindow::Week.start_in(now, "Africa/Nairobi"),
+            Utc.with_ymd_and_hms(2026, 11, 8, 21, 0, 0).unwrap()
+        );
+        assert_eq!(
+            TimeWindow::Day.start_in(now, "Not/AZone"),
+            Utc.with_ymd_and_hms(2026, 11, 14, 0, 0, 0).unwrap()
+        );
     }
 }
 
@@ -142,11 +192,21 @@ pub trait Store: Send + Sync {
         by: &Actor,
         approved: bool,
     ) -> Result<Option<VoidRequest>, StoreError>;
+    /// Counting entries from `since` on, oldest first.
+    async fn list_events_since(
+        &self,
+        business_id: Uuid,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<BusinessEvent>, StoreError>;
+    /// Counting entries in a rolling window (the last 24 h, ...).
     async fn list_events(
         &self,
         business_id: Uuid,
         window: TimeWindow,
-    ) -> Result<Vec<BusinessEvent>, StoreError>;
+    ) -> Result<Vec<BusinessEvent>, StoreError> {
+        self.list_events_since(business_id, window.start(Utc::now()))
+            .await
+    }
     async fn current_stock(&self, business_id: Uuid, item_name: &str) -> Result<f64, StoreError>;
     async fn low_stock_items(&self, business_id: Uuid) -> Result<Vec<StockLevel>, StoreError>;
 
