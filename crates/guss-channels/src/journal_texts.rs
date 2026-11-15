@@ -249,3 +249,47 @@ pub(crate) fn totals_about(
         )
     }
 }
+
+pub fn no_such_line(n: usize, language: &str) -> String {
+    if id(language) {
+        format!("Tidak ada baris {n} untuk dibatalkan.")
+    } else {
+        format!("There's no line {n} to undo.")
+    }
+}
+
+pub fn lines_undone(lines: &[usize], language: &str) -> String {
+    let list = lines
+        .iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match (lines.len() > 1, id(language)) {
+        (false, true) => format!("Baris {list} dibatalkan. Sisanya tetap dihitung."),
+        (true, true) => format!("Baris {list} dibatalkan. Sisanya tetap dihitung."),
+        (false, false) => format!("Line {list} undone. The rest still counts."),
+        (true, false) => format!("Lines {list} undone. The rest still counts."),
+    }
+}
+
+pub fn duplicate_question(line: &str, language: &str) -> String {
+    if id(language) {
+        format!(
+            "Sepertinya ini sudah dicatat:\n{line}\nBelum ada yang disimpan. Balas \"ya\" untuk tetap \
+             menyimpan, atau \"batal\" jika itu penjualan yang sama."
+        )
+    } else {
+        format!(
+            "Looks like this was already recorded:\n{line}\nNothing is saved yet. Reply \"yes\" to save \
+             it again, or \"no\" if it's the same sale."
+        )
+    }
+}
+
+pub fn duplicate_dropped(language: &str) -> String {
+    if id(language) {
+        "(Catatan ganda sebelumnya tidak disimpan.)".to_string()
+    } else {
+        "(The possible double entry was not saved.)".to_string()
+    }
+}

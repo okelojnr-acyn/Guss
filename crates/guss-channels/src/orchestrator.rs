@@ -34,6 +34,9 @@ const KEEP_WORDS: &[&str] = &["keep", "yes", "ya", "simpan"];
 /// After this the held entries are dropped (nothing was saved).
 const QUESTION_TTL: Duration = Duration::minutes(10);
 
+/// How far back "someone already recorded this" looks.
+const DUPLICATE_WINDOW: Duration = Duration::minutes(2);
+
 /// What to do when a message names an amount in a currency other than
 /// the business currency. A wrong currency silently corrupts every total,
 /// so the default asks before saving (the one exception to Guss's
@@ -76,6 +79,8 @@ enum Question {
     Currency { foreign: Vec<String> },
     /// "How many bottles in one crate of soda?"
     Unit(UnitQuestion),
+    /// "Looks like Mary already recorded this a minute ago."
+    Duplicate,
 }
 
 #[derive(Debug, Error)]
@@ -173,7 +178,8 @@ impl OrchestratorError {
 }
 
 struct PendingCommit {
-    event_ids: Vec<Uuid>,
+    /// In confirmation order; None once that line was undone.
+    event_ids: Vec<Option<Uuid>>,
     committed_at: DateTime<Utc>,
 }
 
@@ -258,6 +264,12 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     }
                     dropped_note = Some(currency_dropped_note(&foreign, language));
                 }
+                Question::Duplicate => {
+                    if KEEP_WORDS.contains(&trimmed.as_str()) {
+                        return self.commit(actor, conversation_key, h.events).await;
+                    }
+                    dropped_note = Some(texts::duplicate_dropped(language));
+                }
                 Question::Unit(q) => {
                     if let Some(count) = items::parse_count(&trimmed) {
                         self.learn_unit(&q, count).await?;
@@ -270,8 +282,8 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             // and this message is handled on its own.
         }
 
-        if UNDO_WORDS.contains(&trimmed.as_str()) {
-            return self.handle_undo(actor, conversation_key).await;
+        if let Some(lines) = undo_request(&trimmed) {
+            return self.handle_undo(actor, conversation_key, lines).await;
         }
 
         let reply = self
@@ -368,6 +380,13 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             return Ok(reply);
         }
 
+        if let Some(line) = self.duplicate_of(actor, &events).await? {
+            let reply = texts::duplicate_question(&line, language);
+            self.hold(conversation_key, events, Question::Duplicate)
+                .await;
+            return Ok(reply);
+        }
+
         let foreign = foreign_currencies(&events, home);
         if foreign.is_empty() {
             return self.commit(actor, conversation_key, events).await;
@@ -385,6 +404,28 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 Ok(reply)
             }
         }
+    }
+
+    /// The same sale or restock (item, quantity, price) recorded by someone
+    /// else in the last two minutes: two staff often report one sale.
+    async fn duplicate_of(
+        &self,
+        actor: &Actor,
+        events: &[BusinessEvent],
+    ) -> Result<Option<String>, OrchestratorError> {
+        let since = Utc::now() - DUPLICATE_WINDOW;
+        let recent = self.store.journal(self.business.id, 30).await?;
+        for event in events {
+            if let Some(e) = recent.iter().find(|e| {
+                e.voided.is_none()
+                    && e.recorded_by_id.as_deref() != Some(actor.id.as_str())
+                    && event_time(&e.event) >= since
+                    && same_entry(&e.event, event)
+            }) {
+                return Ok(Some(self.entry_line(e)));
+            }
+        }
+        Ok(None)
     }
 
     async fn hold(&self, conversation_key: &str, events: Vec<BusinessEvent>, question: Question) {
@@ -426,7 +467,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             pending.insert(
                 conversation_key.to_string(),
                 PendingCommit {
-                    event_ids: ids,
+                    event_ids: ids.into_iter().map(Some).collect(),
                     committed_at: Utc::now(),
                 },
             );
@@ -435,27 +476,51 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         Ok(confirmation_reply(&lines, &self.business.language))
     }
 
+    /// Undoes the last confirmation: all of it, or only the numbered
+    /// lines ("no 2"). Lines not undone can still be undone later in the
+    /// window.
     async fn handle_undo(
         &self,
         actor: &Actor,
         conversation_key: &str,
+        lines: Vec<usize>,
     ) -> Result<String, OrchestratorError> {
-        let entry = {
-            let mut pending = self.pending.lock().await;
-            pending.remove(conversation_key)
+        let language = self.business.language.as_str();
+        let mut pending = self.pending.lock().await;
+        let Some(commit) = pending
+            .get_mut(conversation_key)
+            .filter(|c| Utc::now() - c.committed_at <= UNDO_WINDOW)
+        else {
+            pending.remove(conversation_key);
+            return Ok(nothing_to_undo_reply(language));
         };
-
-        match entry {
-            Some(commit) if Utc::now() - commit.committed_at <= UNDO_WINDOW => {
-                // Nothing is deleted: the entries stay in the journal as
-                // voided ("undone"), they just stop counting.
-                for id in commit.event_ids {
-                    self.store.void_event(id, actor, "undone").await?;
-                }
-                Ok(undone_reply(&self.business.language))
+        // Nothing is deleted: undone entries stay in the journal as voided
+        // ("undone"); they just stop counting.
+        if lines.is_empty() {
+            for id in commit.event_ids.drain(..).flatten() {
+                self.store.void_event(id, actor, "undone").await?;
             }
-            _ => Ok(nothing_to_undo_reply(&self.business.language)),
+            pending.remove(conversation_key);
+            return Ok(undone_reply(language));
         }
+        let mut done = Vec::new();
+        for n in lines {
+            match commit
+                .event_ids
+                .get_mut(n.wrapping_sub(1))
+                .and_then(Option::take)
+            {
+                Some(id) => {
+                    self.store.void_event(id, actor, "undone").await?;
+                    done.push(n);
+                }
+                None => return Ok(texts::no_such_line(n, language)),
+            }
+        }
+        if commit.event_ids.iter().all(Option::is_none) {
+            pending.remove(conversation_key);
+        }
+        Ok(texts::lines_undone(&done, language))
     }
 
     /// Answers a question from the books. Staff get today's figures only,
@@ -938,10 +1003,84 @@ fn currency_dropped_note(foreign: &[String], language: &str) -> String {
     }
 }
 
+fn event_time(e: &BusinessEvent) -> DateTime<Utc> {
+    match e {
+        BusinessEvent::Sale(s) => s.occurred_at,
+        BusinessEvent::Expense(x) => x.occurred_at,
+        BusinessEvent::StockUpdate(su) => su.occurred_at,
+        BusinessEvent::Note(n) => n.occurred_at,
+    }
+}
+
+/// Same kind, item, quantity and price: what two people reporting one
+/// sale would both say.
+fn same_entry(a: &BusinessEvent, b: &BusinessEvent) -> bool {
+    let same = |x: &str, y: &str| items::normalize_name(x) == items::normalize_name(y);
+    match (a, b) {
+        (BusinessEvent::Sale(x), BusinessEvent::Sale(y)) => {
+            same(&x.item_name, &y.item_name)
+                && (x.base_quantity() - y.base_quantity()).abs() < 1e-9
+                && x.total() == y.total()
+        }
+        (BusinessEvent::StockUpdate(x), BusinessEvent::StockUpdate(y)) => {
+            same(&x.item_name, &y.item_name) && (x.base_delta() - y.base_delta()).abs() < 1e-9
+        }
+        (BusinessEvent::Expense(x), BusinessEvent::Expense(y)) => {
+            same(&x.description, &y.description) && x.amount == y.amount
+        }
+        _ => false,
+    }
+}
+
+/// "no", "undo", "batal" -> undo everything (empty list); "no 2",
+/// "undo 1 3", "batal 2,3" -> just those lines. None: not an undo.
+fn undo_request(text: &str) -> Option<Vec<usize>> {
+    let mut words = text
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|w| !w.is_empty());
+    let first = words.next()?;
+    if !UNDO_WORDS.contains(&first) {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for w in words {
+        lines.push(
+            w.trim_start_matches('#')
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)?,
+        );
+    }
+    Some(lines)
+}
+
 fn confirmation_reply(lines: &[String], language: &str) -> String {
-    let body = lines.join("\n");
-    match language {
-        "id" => format!("{body}\n\nBalas \"tidak\" dalam 5 menit untuk membatalkan."),
+    // Several lines are numbered so one can be undone on its own.
+    let entries = lines.iter().take_while(|l| !l.is_empty()).count();
+    let body = if entries > 1 {
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if i < entries {
+                    format!("{}. {l}", i + 1)
+                } else {
+                    l.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        lines.join("\n")
+    };
+    match (language, entries > 1) {
+        ("id", true) => format!(
+            "{body}\n\nBalas \"tidak\" dalam 5 menit untuk membatalkan semuanya, atau \"tidak 2\" untuk baris 2 saja."
+        ),
+        ("id", false) => format!("{body}\n\nBalas \"tidak\" dalam 5 menit untuk membatalkan."),
+        (_, true) => format!(
+            "{body}\n\nReply \"no\" within 5 minutes to undo all of it, or \"no 2\" for just line 2."
+        ),
         _ => format!("{body}\n\nReply \"no\" within 5 minutes to undo."),
     }
 }
@@ -1497,6 +1636,82 @@ mod tests {
             muddle.starts_with("I couldn't make sense of that one"),
             "{muddle}"
         );
+    }
+
+    #[test]
+    fn undo_requests_parse() {
+        assert_eq!(undo_request("no"), Some(vec![]));
+        assert_eq!(undo_request("no 2"), Some(vec![2]));
+        assert_eq!(undo_request("undo 1 3"), Some(vec![1, 3]));
+        assert_eq!(undo_request("batal 2,3"), Some(vec![2, 3]));
+        assert_eq!(undo_request("no idea what you mean"), None);
+        assert_eq!(undo_request("no 0"), None);
+        assert_eq!(undo_request("sold 3 rice"), None);
+    }
+
+    #[tokio::test]
+    async fn one_line_can_be_undone_and_the_rest_later() {
+        let three = json!({"events": [
+            {"kind": "expense", "description": "transport", "amount_major": 500.0, "quantity": null,
+             "unit_amount_major": null, "currency": null, "category": null},
+            {"kind": "expense", "description": "claude", "amount_major": 3124.0, "quantity": null,
+             "unit_amount_major": null, "currency": null, "category": null},
+            {"kind": "stock_update", "item_name": "tshirt", "delta": 30.0, "unit": null,
+             "unit_cost_major": 650.0, "total_cost_major": null, "reorder_threshold": null}]});
+        let o = orchestrator(three, "en", OtherCurrencyPolicy::Ask).await;
+        let reply = say(&o, "paid 500 transport, 3124 claude, 30 tshirts at 650").await;
+        assert!(reply.starts_with("1. Expense: transport"), "{reply}");
+        assert!(reply.contains("\n3. Stock tshirt: +30"), "{reply}");
+        assert!(reply.contains("or \"no 2\" for just line 2."), "{reply}");
+
+        assert_eq!(
+            say(&o, "no 2").await,
+            "Line 2 undone. The rest still counts."
+        );
+        assert_eq!(say(&o, "no 2").await, "There's no line 2 to undo.");
+        let left = o
+            .store
+            .list_events(o.business.id, TimeWindow::Day)
+            .await
+            .unwrap();
+        assert_eq!(left.len(), 2);
+        assert_eq!(say(&o, "no").await, "Undone.");
+        assert!(
+            o.store
+                .list_events(o.business.id, TimeWindow::Day)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_sale_from_two_people_asks_before_saving_again() {
+        use guss_core::people::Role;
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
+        let mary = person("mary", Role::Staff);
+        let joe = person("joe", Role::Staff);
+        record_as(&o, &mary).await;
+        let reply = o
+            .handle_message_as(&joe, &joe.id, SourceChannel::Telegram, "sold 3 rice at 120")
+            .await
+            .unwrap();
+        assert!(
+            reply.starts_with("Looks like this was already recorded"),
+            "{reply}"
+        );
+        assert!(reply.contains("(mary)"), "{reply}");
+        assert_eq!(saved_sales(&o).await.len(), 1);
+        let reply = o
+            .handle_message_as(&joe, &joe.id, SourceChannel::Telegram, "yes")
+            .await
+            .unwrap();
+        assert!(reply.starts_with("Sold:"), "{reply}");
+        assert_eq!(saved_sales(&o).await.len(), 2);
+
+        // The same person saying it twice is not asked (they meant it).
+        record_as(&o, &mary).await;
+        assert_eq!(saved_sales(&o).await.len(), 3);
     }
 
     #[test]
