@@ -132,7 +132,36 @@ async fn main() {
     };
 
     let business = match store.load_business_profile().await {
-        Ok(Some(profile)) => profile,
+        // The configured values win on every start: they come from the
+        // settings form (Friday Host) or .env, and the stored profile used
+        // to keep its first-start values forever (changing the currency
+        // in settings did nothing). The id stays, so history is kept.
+        Ok(Some(mut profile)) => {
+            let configured = (
+                &config.business.name,
+                &config.business.currency,
+                &config.business.language,
+                &config.business.timezone,
+            );
+            let stored = (
+                &profile.name,
+                &profile.default_currency,
+                &profile.language,
+                &profile.timezone,
+            );
+            if configured != stored {
+                profile.name = config.business.name.clone();
+                profile.default_currency = config.business.currency.clone();
+                profile.language = config.business.language.clone();
+                profile.timezone = config.business.timezone.clone();
+                if let Err(e) = store.save_business_profile(&profile).await {
+                    eprintln!("Guss failed to update the business profile: {e}");
+                    std::process::exit(1);
+                }
+                tracing::info!(business = %profile.name, currency = %profile.default_currency, "business profile updated from config");
+            }
+            profile
+        }
         Ok(None) => {
             let profile = BusinessProfile {
                 id: Uuid::new_v4(),
