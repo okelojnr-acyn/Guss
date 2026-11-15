@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::orchestrator::Orchestrator;
+use crate::telegram_ux::{self, Command, TelegramAccess};
 use crate::voice_support::VoiceSupport;
 
 /// Delivers scheduled (EOD/weekly/monthly) reports to a fixed Telegram
@@ -88,6 +89,7 @@ pub async fn run<P, S>(
     orchestrator: Arc<Orchestrator<P, S>>,
     voice: Arc<VoiceSupport>,
     bot_token: &str,
+    access: TelegramAccess,
 ) -> Result<(), TelegramError>
 where
     P: LlmProvider + Send + Sync + 'static,
@@ -99,6 +101,16 @@ where
     let mut offset: i32 = 0;
 
     tracing::info!("Telegram channel starting (long polling)");
+    if access.is_open() {
+        tracing::warn!(
+            "No Telegram owner or allowed users set: anyone who finds this bot can record entries.              Set GUSS_CHANNEL__TELEGRAM_OWNER_CHAT_ID and/or GUSS_CHANNEL__TELEGRAM_ALLOWED_USER_IDS."
+        );
+    }
+    {
+        let business = orchestrator.business();
+        telegram_ux::apply_profile(&bot, &business.name, &business.language).await;
+    }
+    let access = Arc::new(access);
 
     let mut failures: u32 = 0;
     loop {
@@ -136,9 +148,11 @@ where
                 let orchestrator = orchestrator.clone();
                 let voice = voice.clone();
                 let bot = bot.clone();
+                let access = access.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    if let Err(e) = handle_message(&orchestrator, &voice, &bot, msg).await {
+                    if let Err(e) = handle_message(&orchestrator, &voice, &bot, &access, msg).await
+                    {
                         tracing::warn!(error = %e, "failed to handle Telegram message");
                     }
                 });
@@ -155,6 +169,7 @@ async fn handle_message<P, S>(
     orchestrator: &Orchestrator<P, S>,
     voice: &VoiceSupport,
     bot: &Bot,
+    access: &TelegramAccess,
     msg: teloxide::types::Message,
 ) -> Result<(), TelegramError>
 where
@@ -164,8 +179,66 @@ where
     let chat_id = msg.chat.id;
     let conversation_key = chat_id.0.to_string();
     let provider_message_id = msg.id.0.to_string();
+    let language = orchestrator.business().language.clone();
+    let business_name = orchestrator.business().name.clone();
 
-    let text = if let Some(text) = msg.text() {
+    // Groups would let anyone in them write to the books.
+    if !msg.chat.is_private() {
+        send_text(bot, chat_id, &telegram_ux::private_chats_only(&language)).await?;
+        return Ok(());
+    }
+    let Some(user) = msg.from.as_ref() else {
+        return Ok(());
+    };
+    let user_id = user.id.0 as i64;
+    let command = msg.text().and_then(telegram_ux::parse_command);
+
+    if command == Some(Command::MyId) {
+        send_text(bot, chat_id, &telegram_ux::your_id(&language, user_id)).await?;
+        return Ok(());
+    }
+    if !access.allows(user_id) {
+        tracing::info!(user_id, "refused a message from a user who isn't allowed");
+        send_text(
+            bot,
+            chat_id,
+            &telegram_ux::private_bot(&language, &business_name, user_id),
+        )
+        .await?;
+        return Ok(());
+    }
+    match command {
+        Some(Command::Start) => {
+            let reply = telegram_ux::welcome(&language, &business_name, &user.first_name);
+            send_text(bot, chat_id, &reply).await?;
+            return Ok(());
+        }
+        Some(Command::Help) => {
+            send_text(bot, chat_id, &telegram_ux::help(&language)).await?;
+            return Ok(());
+        }
+        Some(Command::Report(arg)) => {
+            let reply = match telegram_ux::report_window(arg.as_deref()) {
+                Some(window) => orchestrator
+                    .handle_report(window)
+                    .await
+                    .map_err(|e| TelegramError::Api(e.to_string()))?,
+                None => telegram_ux::bad_report_window(&language),
+            };
+            send_text(bot, chat_id, &reply).await?;
+            return Ok(());
+        }
+        Some(Command::Unknown) => {
+            send_text(bot, chat_id, &telegram_ux::unknown_command(&language)).await?;
+            return Ok(());
+        }
+        Some(Command::Undo) | Some(Command::MyId) | None => {}
+    }
+    let undo_text = (command == Some(Command::Undo)).then(|| "undo".to_string());
+
+    let text = if let Some(undo) = undo_text {
+        undo
+    } else if let Some(text) = msg.text() {
         text.to_string()
     } else if let Some(telegram_voice) = msg.voice() {
         match transcribe_voice_note(voice, bot, telegram_voice.file.id.clone()).await {
@@ -337,14 +410,102 @@ mod tests {
         let message: Message =
             serde_json::from_value(sample_message_json(7, 42, "slow day today")).unwrap();
 
-        handle_message(&orchestrator, &voice, &bot, message.clone())
+        let access = TelegramAccess::default();
+        handle_message(&orchestrator, &voice, &bot, &access, message.clone())
             .await
             .unwrap();
-        handle_message(&orchestrator, &voice, &bot, message)
+        handle_message(&orchestrator, &voice, &bot, &access, message)
             .await
             .unwrap();
 
         server.verify().await;
+    }
+
+    async fn sent_texts(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()).map(str::to_string))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stranger_is_refused_and_nothing_is_recorded() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": sample_message_json(1, 42, "reply")
+            })))
+            .mount(&server)
+            .await;
+        let bot = Bot::new("TEST_TOKEN").set_api_url(server.uri().parse().unwrap());
+        let orchestrator = test_orchestrator().await;
+        let access = TelegramAccess {
+            owner_chat_id: Some(10),
+            allowed_user_ids: vec![],
+        };
+        let message: Message =
+            serde_json::from_value(sample_message_json(7, 42, "sold 3 rice at 120")).unwrap();
+
+        handle_message(
+            &orchestrator,
+            &VoiceSupport::default(),
+            &bot,
+            &access,
+            message,
+        )
+        .await
+        .unwrap();
+
+        let texts = sent_texts(&server).await;
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains("private") && texts[0].contains("42"),
+            "{}",
+            texts[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn start_welcomes_an_allowed_user_without_recording() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": sample_message_json(1, 42, "reply")
+            })))
+            .mount(&server)
+            .await;
+        let bot = Bot::new("TEST_TOKEN").set_api_url(server.uri().parse().unwrap());
+        let orchestrator = test_orchestrator().await;
+        let access = TelegramAccess {
+            owner_chat_id: Some(42),
+            allowed_user_ids: vec![],
+        };
+        let message: Message =
+            serde_json::from_value(sample_message_json(8, 42, "/start")).unwrap();
+
+        handle_message(
+            &orchestrator,
+            &VoiceSupport::default(),
+            &bot,
+            &access,
+            message,
+        )
+        .await
+        .unwrap();
+
+        let texts = sent_texts(&server).await;
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].starts_with("Hi Test!") && texts[0].contains("/report"),
+            "{}",
+            texts[0]
+        );
     }
 }
 

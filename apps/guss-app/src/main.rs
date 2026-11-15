@@ -256,7 +256,24 @@ async fn main() {
                 None
             };
 
-            if let Err(e) = telegram::run(orchestrator, voice, token).await {
+            let (allowed_user_ids, bad) = guss_channels::telegram_ux::TelegramAccess::parse_ids(
+                config
+                    .channel
+                    .telegram_allowed_user_ids
+                    .as_deref()
+                    .unwrap_or(""),
+            );
+            if !bad.is_empty() {
+                tracing::warn!(
+                    ?bad,
+                    "ignoring GUSS_CHANNEL__TELEGRAM_ALLOWED_USER_IDS entries that aren't numbers"
+                );
+            }
+            let access = guss_channels::telegram_ux::TelegramAccess {
+                owner_chat_id: config.channel.telegram_owner_chat_id,
+                allowed_user_ids,
+            };
+            if let Err(e) = telegram::run(orchestrator, voice, token, access).await {
                 eprintln!("Telegram channel exited with an error: {e}");
                 std::process::exit(1);
             }

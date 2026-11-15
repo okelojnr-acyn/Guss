@@ -143,6 +143,9 @@ pub struct ChannelConfig {
     /// business owner's own chat/number. Without this, Guss still answers
     /// on-demand "report" requests but can't proactively push one.
     pub telegram_owner_chat_id: Option<i64>,
+    /// Other Telegram user ids allowed to use the bot, comma-separated
+    /// (staff). With this or the owner set, everyone else is refused.
+    pub telegram_allowed_user_ids: Option<String>,
     pub whatsapp_owner_phone_number: Option<String>,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
@@ -174,6 +177,7 @@ impl Default for ChannelConfig {
             whatsapp_app_secret: None,
             whatsapp_listen_addr: default_whatsapp_listen_addr(),
             telegram_owner_chat_id: None,
+            telegram_allowed_user_ids: None,
             whatsapp_owner_phone_number: None,
             scheduler: SchedulerConfig::default(),
         }
