@@ -8,6 +8,13 @@
 //!   GET  /health            - no auth, for uptime checks
 //!   POST /api/chat          - {conversation_id, text} -> {reply}
 //!   GET  /api/report?window=day|week|month -> {reply}
+//!   GET  /api/voids          - void requests waiting for a decision
+//!   POST /api/voids/decide   - {number, approve, actor} -> {reply}
+//!
+//! `actor` ({id, name, role}: owner | manager | staff) says which Friday
+//! person is asking; Friday's kernel sets it from the signed-in user, so
+//! the chain of command applies in the widget as on Telegram. Without it
+//! (older Friday) Guss acts as the owner.
 
 use std::sync::Arc;
 
@@ -17,6 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use guss_core::domain::SourceChannel;
+use guss_core::people::{Actor, Role};
 use guss_core::store::{Store, TimeWindow};
 use guss_llm::LlmProvider;
 use serde::{Deserialize, Serialize};
@@ -60,6 +68,8 @@ where
         .route("/health", get(health::<P, S>))
         .route("/api/chat", post(chat::<P, S>))
         .route("/api/report", get(report::<P, S>))
+        .route("/api/voids", get(voids::<P, S>))
+        .route("/api/voids/decide", post(decide::<P, S>))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
 }
@@ -101,6 +111,89 @@ struct Reply {
     reply: String,
 }
 
+#[derive(Deserialize)]
+struct ActorIn {
+    id: String,
+    name: String,
+    role: String,
+}
+
+impl ActorIn {
+    /// Only Friday's own ids, so a caller can't pose as a Telegram user.
+    fn into_actor(self) -> Option<Actor> {
+        let role = Role::parse(&self.role)?;
+        let id = self.id.trim();
+        if !id.starts_with("friday:") || id.len() > 128 {
+            return None;
+        }
+        Some(Actor::new(
+            id,
+            self.name.trim().chars().take(80).collect::<String>(),
+            role,
+        ))
+    }
+}
+
+async fn voids<P, S>(State(state): State<Arc<AppState<P, S>>>, headers: HeaderMap) -> Response
+where
+    P: LlmProvider + Send + Sync + 'static,
+    S: Store + Send + Sync + 'static,
+{
+    if !token_ok(&state.token, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong token");
+    }
+    match state.orchestrator.pending_void_list().await {
+        Ok(requests) => Json(serde_json::json!({ "requests": requests })).into_response(),
+        Err(e) => error(
+            StatusCode::BAD_GATEWAY,
+            &e.user_message(&state.orchestrator.business().language),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct DecideReq {
+    number: i64,
+    approve: bool,
+    actor: ActorIn,
+}
+
+async fn decide<P, S>(
+    State(state): State<Arc<AppState<P, S>>>,
+    headers: HeaderMap,
+    Json(req): Json<DecideReq>,
+) -> Response
+where
+    P: LlmProvider + Send + Sync + 'static,
+    S: Store + Send + Sync + 'static,
+{
+    if !token_ok(&state.token, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong token");
+    }
+    let Some(actor) = req.actor.into_actor() else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "actor: friday:<id>, a name, and role owner, manager or staff",
+        );
+    };
+    // Telegram notices about the decision aren't sent from here; the
+    // person who asked sees it in /history.
+    match state
+        .orchestrator
+        .decide_void(&actor, req.number, req.approve)
+        .await
+    {
+        Ok(outcome) => Json(Reply {
+            reply: outcome.reply,
+        })
+        .into_response(),
+        Err(e) => error(
+            StatusCode::BAD_GATEWAY,
+            &e.user_message(&state.orchestrator.business().language),
+        ),
+    }
+}
+
 fn error(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -124,6 +217,9 @@ async fn health<P: LlmProvider, S: Store>(
 struct ChatRequest {
     conversation_id: String,
     text: String,
+    /// The Friday person asking (see the module docs); None acts as owner.
+    #[serde(default)]
+    actor: Option<ActorIn>,
 }
 
 async fn chat<P, S>(
@@ -160,9 +256,21 @@ where
             "Guss is busy, try again in a moment",
         );
     };
+    let actor = match req.actor {
+        Some(a) => match a.into_actor() {
+            Some(actor) => actor,
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "actor: friday:<id>, a name, and role owner, manager or staff",
+                );
+            }
+        },
+        None => Actor::owner("web"),
+    };
     match state
         .orchestrator
-        .handle_message(&format!("web:{id}"), SourceChannel::Web, text)
+        .handle_message_as(&actor, &format!("web:{id}"), SourceChannel::Web, text)
         .await
     {
         Ok(reply) => Json(Reply { reply }).into_response(),
@@ -217,6 +325,25 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("authorization", v.parse().unwrap());
         h
+    }
+
+    #[test]
+    fn actors_must_be_friday_people_with_a_known_role() {
+        let actor = |id: &str, role: &str| {
+            ActorIn {
+                id: id.into(),
+                name: "Mary".into(),
+                role: role.into(),
+            }
+            .into_actor()
+        };
+        let mary = actor("friday:u1", "staff").unwrap();
+        assert_eq!((mary.id.as_str(), mary.role), ("friday:u1", Role::Staff));
+        assert_eq!(actor("friday:u2", "manager").unwrap().role, Role::Manager);
+        // No posing as a Telegram user, no made-up roles.
+        assert!(actor("telegram:7", "owner").is_none());
+        assert!(actor("friday:u1", "admin").is_none());
+        assert!(actor("friday:u1", "viewer").is_none());
     }
 
     #[test]
