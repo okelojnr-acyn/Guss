@@ -187,7 +187,7 @@ impl Store for PostgresStore {
 
     async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError> {
         let rows = sqlx::query(
-            "SELECT seq AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error, (voided_at IS NOT NULL) AS reverse FROM events WHERE business_id = $1 AND kind IN ('sale', 'stock_update') AND ((synced_at IS NULL AND voided_at IS NULL) OR (voided_at IS NOT NULL AND synced_at IS NOT NULL AND synced_at <> 'skipped' AND void_synced_at IS NULL)) ORDER BY seq LIMIT $2",
+            "SELECT seq AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error, (voided_at IS NOT NULL) AS reverse FROM events WHERE business_id = $1 AND kind IN ('sale', 'expense', 'stock_update') AND ((synced_at IS NULL AND voided_at IS NULL) OR (voided_at IS NOT NULL AND synced_at IS NOT NULL AND synced_at <> 'skipped' AND void_synced_at IS NULL)) ORDER BY seq LIMIT $2",
         )
         .bind(business_id.to_string())
         .bind(limit)

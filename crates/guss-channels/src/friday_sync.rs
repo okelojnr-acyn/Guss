@@ -1,22 +1,36 @@
-//! Sends Guss's entries to Friday Inventory: a sale lowers stock, a
-//! restock raises it, a write-off lowers it, and a voided entry is
-//! reversed. Each move is made *as the person who recorded the entry*
-//! (their linked Friday account), tagged "guss:<entry id>" so a retry
-//! never counts twice. Nothing is lost if Friday is down: entries wait in
-//! the journal and go on the next round.
+//! Sends Guss's entries to Friday, as *the person who recorded each one*
+//! (their linked Friday account), to every app the org lets Guss write:
+//!
+//! - Inventory: a sale lowers stock, a restock raises it, a write-off
+//!   lowers it.
+//! - Accounting: a cash sale (Dr Cash, Cr Sales Revenue), an expense (Dr
+//!   Shop expenses, Cr Cash) and a paid restock (Dr Inventory, Cr Cash), as
+//!   draft journal entries the accountant posts.
+//!
+//! A voided entry is reversed in both. Everything is tagged
+//! "guss:<entry id>" and checked first, so a retry never counts twice.
+//! Nothing is lost if Friday is down: entries wait in the journal and go
+//! on the next round.
 
 use std::time::Duration;
 
-use guss_core::domain::BusinessEvent;
+use chrono::{DateTime, Utc};
+use guss_core::domain::{BusinessEvent, BusinessProfile};
 use guss_core::store::{Store, StoreError, SyncItem};
 use serde_json::{Value, json};
-use uuid::Uuid;
 
 use crate::friday::{FridayClient, FridayError, telegram_id_of};
 use crate::items::normalize_name;
 
 pub const SYNC_EVERY: Duration = Duration::from_secs(30);
 const BATCH: i64 = 50;
+
+/// Accounting accounts Guss books into (Friday's starter chart, plus one
+/// expense account Guss adds the first time it needs it).
+const CASH: &str = "1010";
+const INVENTORY_ASSET: &str = "1400";
+const SALES_REVENUE: &str = "4000";
+const SHOP_EXPENSES: (&str, &str) = ("6900", "Shop expenses");
 
 /// Why an entry didn't reach Friday. `permanent` ones are shown in
 /// /history and not retried.
@@ -46,12 +60,12 @@ fn permanent(message: impl Into<String>) -> Failure {
 pub async fn sync_once<S: Store + ?Sized>(
     store: &S,
     friday: &FridayClient,
-    business_id: Uuid,
+    business: &BusinessProfile,
 ) -> Result<usize, StoreError> {
     let mut done = 0;
-    for item in store.to_sync(business_id, BATCH).await? {
+    for item in store.to_sync(business.id, BATCH).await? {
         let id = item.entry.event.id();
-        match push(friday, &item).await {
+        match push(friday, business, &item).await {
             Ok(()) => {
                 store.mark_synced(id, item.reverse).await?;
                 done += 1;
@@ -70,9 +84,9 @@ pub async fn sync_once<S: Store + ?Sized>(
 }
 
 /// Runs `sync_once` forever, every `SYNC_EVERY`.
-pub async fn run<S: Store + ?Sized>(store: &S, friday: &FridayClient, business_id: Uuid) {
+pub async fn run<S: Store + ?Sized>(store: &S, friday: &FridayClient, business: BusinessProfile) {
     loop {
-        match sync_once(store, friday, business_id).await {
+        match sync_once(store, friday, &business).await {
             Ok(0) => {}
             Ok(n) => tracing::info!(entries = n, "sent to Friday"),
             Err(e) => tracing::warn!(error = %e, "Friday sync couldn't read the journal"),
@@ -97,15 +111,68 @@ fn stock_change(event: &BusinessEvent) -> Option<(&str, f64, &'static str)> {
     }
 }
 
-async fn push(friday: &FridayClient, item: &SyncItem) -> Result<(), Failure> {
+/// What a journal entry means for Accounting: (debit account, credit
+/// account, amount in cents, currency, memo). None: nothing to book (a
+/// write-off, a note, a restock without a cost).
+fn booking(event: &BusinessEvent) -> Option<(&'static str, &'static str, i64, String, String)> {
+    let cents = |major: f64| (major * 100.0).round() as i64;
+    match event {
+        BusinessEvent::Sale(s) => {
+            let total = s.total();
+            Some((
+                CASH,
+                SALES_REVENUE,
+                cents(total.major_units()),
+                total.currency,
+                format!("Guss: sold {} {}", s.quantity, s.item_name),
+            ))
+        }
+        BusinessEvent::Expense(x) => Some((
+            SHOP_EXPENSES.0,
+            CASH,
+            cents(x.amount.major_units()),
+            x.amount.currency.clone(),
+            format!("Guss: {}", x.description),
+        )),
+        BusinessEvent::StockUpdate(su) if su.delta > 0.0 => su.unit_cost.as_ref().map(|c| {
+            (
+                INVENTORY_ASSET,
+                CASH,
+                cents(su.delta * c.major_units()),
+                c.currency.clone(),
+                format!("Guss: bought {} {}", su.delta, su.item_name),
+            )
+        }),
+        _ => None,
+    }
+}
+
+fn occurred_at(event: &BusinessEvent) -> DateTime<Utc> {
+    match event {
+        BusinessEvent::Sale(s) => s.occurred_at,
+        BusinessEvent::Expense(x) => x.occurred_at,
+        BusinessEvent::StockUpdate(su) => su.occurred_at,
+        BusinessEvent::Note(n) => n.occurred_at,
+    }
+}
+
+async fn push(
+    friday: &FridayClient,
+    business: &BusinessProfile,
+    item: &SyncItem,
+) -> Result<(), Failure> {
     let entry = &item.entry;
-    let Some((name, change, reason)) = stock_change(&entry.event) else {
+    let stock = stock_change(&entry.event);
+    let book = booking(&entry.event);
+    if stock.is_none() && book.is_none() {
         return Ok(());
-    };
+    }
     let people = friday.people().await?;
-    if !people.can_write("inventory") {
+    let to_inventory = stock.is_some() && people.can_write("inventory");
+    let to_accounting = book.is_some() && people.can_write("accounting");
+    if !to_inventory && !to_accounting {
         return Err(permanent(
-            "Guss may not change Inventory (Friday: Integrations, Guss)",
+            "Guss may not change Inventory or Accounting (Friday: Integrations, Guss)",
         ));
     }
     let who = entry
@@ -122,14 +189,6 @@ async fn push(friday: &FridayClient, item: &SyncItem) -> Result<(), Failure> {
             "{who} isn't linked to Friday (send /link)"
         )));
     };
-
-    let delta = if item.reverse { -change } else { change };
-    if (delta - delta.round()).abs() > 1e-9 {
-        return Err(permanent(format!(
-            "Friday Inventory counts whole units; {} {name} wasn't sent",
-            delta.abs()
-        )));
-    }
     let id = entry.event.id();
     let reference = if item.reverse {
         format!("guss-void:{id}")
@@ -137,32 +196,116 @@ async fn push(friday: &FridayClient, item: &SyncItem) -> Result<(), Failure> {
         format!("guss:{id}")
     };
 
-    // Already there (an earlier attempt got through but its answer
-    // didn't): done.
-    let existing = friday
-        .get(
-            &token,
-            &format!("/api/inventory/stock_moves?reference={reference}"),
-        )
-        .await?;
-    if existing.as_array().is_some_and(|a| !a.is_empty()) {
-        return Ok(());
+    if let (true, Some((name, change, reason))) = (to_inventory, stock) {
+        let delta = if item.reverse { -change } else { change };
+        if (delta - delta.round()).abs() > 1e-9 {
+            return Err(permanent(format!(
+                "Friday Inventory counts whole units; {} {name} wasn't sent",
+                delta.abs()
+            )));
+        }
+        // Already there (an earlier attempt got through but its answer
+        // didn't): skip.
+        let existing = friday
+            .get(
+                &token,
+                &format!("/api/inventory/stock_moves?reference={reference}"),
+            )
+            .await?;
+        if !existing.as_array().is_some_and(|a| !a.is_empty()) {
+            let product_id = find_or_create_product(friday, &token, name).await?;
+            friday
+                .post(
+                    &token,
+                    &format!("/api/inventory/products/{product_id}/adjust-stock"),
+                    &json!({
+                        "delta": delta.round() as i64,
+                        // A reversal is a correction, whatever the original was.
+                        "reason": if item.reverse { "manual_adjustment" } else { reason },
+                        "reference": reference,
+                    }),
+                )
+                .await?;
+        }
     }
 
-    let product_id = find_or_create_product(friday, &token, name).await?;
-    friday
-        .post(
-            &token,
-            &format!("/api/inventory/products/{product_id}/adjust-stock"),
-            &json!({
-                "delta": delta.round() as i64,
-                // A reversal is a correction, whatever the original was.
-                "reason": if item.reverse { "manual_adjustment" } else { reason },
-                "reference": reference,
-            }),
-        )
-        .await?;
+    if let (true, Some((debit, credit, cents, currency, memo))) = (to_accounting, book) {
+        if !currency.eq_ignore_ascii_case(business.default_currency.trim()) {
+            return Err(permanent(format!(
+                "in {currency}; Accounting books {} only",
+                business.default_currency
+            )));
+        }
+        let existing = friday
+            .get(
+                &token,
+                &format!("/api/accounting/journal_entries?source_ref={reference}"),
+            )
+            .await?;
+        if !existing.as_array().is_some_and(|a| !a.is_empty()) {
+            let (debit, credit) = if item.reverse {
+                (credit, debit)
+            } else {
+                (debit, credit)
+            };
+            let accounts = accounts(friday, &token).await?;
+            let date = occurred_at(&entry.event)
+                .with_timezone(&business.timezone.trim().parse().unwrap_or(chrono_tz::UTC))
+                .date_naive();
+            let memo = if item.reverse {
+                format!("Reversal: {memo}")
+            } else {
+                memo
+            };
+            friday
+                .post(
+                    &token,
+                    "/api/accounting/journal_entries",
+                    &json!({
+                        "entry_date": date.to_string(),
+                        "memo": memo,
+                        "source": "guss",
+                        "source_ref": reference,
+                        "lines": [
+                            {"account_id": account_id(&accounts, debit)?, "debit_cents": cents},
+                            {"account_id": account_id(&accounts, credit)?, "credit_cents": cents},
+                        ],
+                    }),
+                )
+                .await?;
+        }
+    }
     Ok(())
+}
+
+/// The org's accounts, adding "6900 Shop expenses" the first time.
+async fn accounts(friday: &FridayClient, token: &str) -> Result<Vec<Value>, Failure> {
+    let list = friday.get(token, "/api/accounting/accounts").await?;
+    let mut accounts = list.as_array().cloned().unwrap_or_default();
+    let has = |code: &str, a: &[Value]| {
+        a.iter()
+            .any(|x| x.get("code").and_then(Value::as_str) == Some(code))
+    };
+    if !has(SHOP_EXPENSES.0, &accounts) {
+        let created = friday
+            .post(
+                token,
+                "/api/accounting/accounts",
+                &json!({"code": SHOP_EXPENSES.0, "name": SHOP_EXPENSES.1, "type": "expense"}),
+            )
+            .await?;
+        accounts.push(created);
+    }
+    Ok(accounts)
+}
+
+fn account_id(accounts: &[Value], code: &str) -> Result<String, Failure> {
+    accounts
+        .iter()
+        .find(|a| a.get("code").and_then(Value::as_str) == Some(code))
+        .and_then(|a| a.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| permanent(format!("Accounting has no account {code}")))
 }
 
 /// The Inventory product with this name (any spelling Guss treats as the
@@ -203,10 +346,11 @@ async fn find_or_create_product(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use guss_core::domain::{Sale, SourceChannel, StockUpdate};
+    use guss_core::domain::{Expense, Sale, SourceChannel, StockUpdate};
     use guss_core::money::CurrencyAmount;
     use guss_core::people::{Actor, Role};
     use guss_store::SqliteStore;
+    use uuid::Uuid;
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -246,14 +390,28 @@ mod tests {
         })
     }
 
+    fn shop(id: Uuid) -> BusinessProfile {
+        BusinessProfile {
+            id,
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "Africa/Nairobi".into(),
+        }
+    }
+
     async fn friday(access: &str) -> MockServer {
+        friday_with(json!({"inventory": access})).await
+    }
+
+    async fn friday_with(access: Value) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/guss/svc/people"))
             .and(header("authorization", format!("Bearer {KEY}").as_str()))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "people": [{"telegram_id": 7, "telegram_name": "Mary", "guss_role": "staff"}],
-                "access": {"inventory": access}
+                "access": access
             })))
             .mount(&server)
             .await;
@@ -308,8 +466,18 @@ mod tests {
             .await;
 
         let client = FridayClient::new(server.uri(), KEY);
-        assert_eq!(sync_once(&store, &client, business_id).await.unwrap(), 1);
-        assert_eq!(sync_once(&store, &client, business_id).await.unwrap(), 0);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            0
+        );
 
         // Voided after it reached Friday: the reversal goes out.
         let boss = Actor::new("telegram:1", "Boss", Role::Owner);
@@ -324,7 +492,12 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        assert_eq!(sync_once(&store, &client, business_id).await.unwrap(), 1);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
         assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
     }
 
@@ -339,11 +512,16 @@ mod tests {
             .await
             .unwrap();
         let client = FridayClient::new(server.uri(), KEY);
-        assert_eq!(sync_once(&store, &client, business_id).await.unwrap(), 0);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            0
+        );
         let journal = store.journal(business_id, 5).await.unwrap();
         assert_eq!(
             journal[0].sync_error.as_deref(),
-            Some("Guss may not change Inventory (Friday: Integrations, Guss)")
+            Some("Guss may not change Inventory or Accounting (Friday: Integrations, Guss)")
         );
         assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
 
@@ -355,7 +533,9 @@ mod tests {
             .save_event_by(&sale(business_id, "soda", 1.0), Some(&stranger))
             .await
             .unwrap();
-        sync_once(&store, &client, business_id).await.unwrap();
+        sync_once(&store, &client, &shop(business_id))
+            .await
+            .unwrap();
         let journal = store.journal(business_id, 5).await.unwrap();
         assert_eq!(
             journal[0].sync_error.as_deref(),
@@ -374,9 +554,105 @@ mod tests {
             .unwrap();
         // Nothing listens here.
         let client = FridayClient::new("http://127.0.0.1:9", KEY);
-        assert_eq!(sync_once(&store, &client, business_id).await.unwrap(), 0);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            0
+        );
         let queue = store.to_sync(business_id, 10).await.unwrap();
         assert_eq!(queue.len(), 1, "kept for the next round");
         assert!(queue[0].entry.sync_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn expenses_and_sales_are_booked_in_accounting_as_drafts() {
+        let server = friday_with(json!({"inventory": "none", "accounting": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let transport = BusinessEvent::Expense(Expense {
+            id: Uuid::new_v4(),
+            business_id,
+            description: "transport".into(),
+            amount: CurrencyAmount::new(500.0, "KES"),
+            category: None,
+            occurred_at: Utc::now(),
+            recurring: None,
+            source_channel: SourceChannel::Telegram,
+            raw_text: None,
+        });
+        store.save_event_by(&transport, Some(&mary)).await.unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/api/accounting/journal_entries"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        // No "6900 Shop expenses" yet: Guss adds it.
+        Mock::given(method("GET"))
+            .and(path("/api/accounting/accounts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": "a-cash", "code": "1010"}, {"id": "a-sales", "code": "4000"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/accounting/accounts"))
+            .and(body_partial_json(
+                json!({"code": "6900", "type": "expense"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(json!({"id": "a-shop", "code": "6900"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/accounting/journal_entries"))
+            .and(body_partial_json(json!({
+                "source": "guss",
+                "source_ref": format!("guss:{}", transport.id()),
+                "memo": "Guss: transport",
+                "lines": [
+                    {"account_id": "a-shop", "debit_cents": 50000},
+                    {"account_id": "a-cash", "credit_cents": 50000}
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "je-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn other_currencies_are_not_booked() {
+        let server = friday_with(json!({"accounting": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let mut usd = sale(business_id, "phone", 1.0);
+        if let BusinessEvent::Sale(s) = &mut usd {
+            s.unit_price = CurrencyAmount::new(50.0, "USD");
+        }
+        store.save_event_by(&usd, Some(&mary)).await.unwrap();
+        let client = FridayClient::new(server.uri(), KEY);
+        sync_once(&store, &client, &shop(business_id))
+            .await
+            .unwrap();
+        let journal = store.journal(business_id, 1).await.unwrap();
+        assert_eq!(
+            journal[0].sync_error.as_deref(),
+            Some("in USD; Accounting books KES only")
+        );
     }
 }

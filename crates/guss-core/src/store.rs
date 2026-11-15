@@ -158,8 +158,8 @@ pub trait Store: Send + Sync {
         number: i64,
     ) -> Result<Option<JournalEntry>, StoreError>;
 
-    /// Sales and stock updates not yet in Friday, and voided ones whose
-    /// reversal isn't, oldest first.
+    /// Sales, expenses and stock updates not yet in Friday, and voided ones
+    /// whose reversal isn't, oldest first.
     async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError>;
     async fn mark_synced(&self, id: Uuid, reverse: bool) -> Result<(), StoreError>;
     /// `permanent`: never retried (shown in /history); otherwise kept for
