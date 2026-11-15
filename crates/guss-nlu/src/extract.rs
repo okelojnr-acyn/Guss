@@ -53,6 +53,8 @@ impl<P: LlmProvider> Nlu<P> {
         }
     }
 
+    /// The events Guss could fully work out; anything with a problem
+    /// (see `extract_checked`) is left out.
     pub async fn extract(
         &self,
         business_id: Uuid,
@@ -61,6 +63,30 @@ impl<P: LlmProvider> Nlu<P> {
         default_currency: &str,
         context_snippets: &[String],
     ) -> Result<Vec<BusinessEvent>, NluError> {
+        Ok(self
+            .extract_checked(
+                business_id,
+                source_channel,
+                text,
+                default_currency,
+                context_snippets,
+            )
+            .await?
+            .events)
+    }
+
+    /// Like `extract`, but also returns what Guss couldn't work out (a
+    /// stated total that disagrees with quantity x price, a missing or
+    /// non-positive price). Callers should save nothing from a message
+    /// with issues and tell the owner instead.
+    pub async fn extract_checked(
+        &self,
+        business_id: Uuid,
+        source_channel: SourceChannel,
+        text: &str,
+        default_currency: &str,
+        context_snippets: &[String],
+    ) -> Result<Extraction, NluError> {
         let schema_value = serde_json::to_value(schemars::schema_for!(ExtractedEvents))
             .expect("ExtractedEvents schema always serializes");
         let system = system_prompt(&self.language, context_snippets);
@@ -79,19 +105,20 @@ impl<P: LlmProvider> Nlu<P> {
 
             match serde_json::from_value::<ExtractedEvents>(value.clone()) {
                 Ok(dto) => {
-                    return Ok(dto
-                        .events
-                        .into_iter()
-                        .map(|e| {
-                            to_business_event(
-                                e,
-                                business_id,
-                                source_channel,
-                                text,
-                                default_currency,
-                            )
-                        })
-                        .collect());
+                    let mut out = Extraction::default();
+                    for e in dto.events {
+                        match to_business_event(
+                            e,
+                            business_id,
+                            source_channel,
+                            text,
+                            default_currency,
+                        ) {
+                            Ok(event) => out.events.push(event),
+                            Err(issue) => out.issues.push(issue),
+                        }
+                    }
+                    return Ok(out);
                 }
                 Err(parse_err) => {
                     if attempt == self.max_retries {
@@ -114,74 +141,213 @@ impl<P: LlmProvider> Nlu<P> {
     }
 }
 
+/// Everything one message produced: what can be saved, and what Guss
+/// couldn't work out.
+#[derive(Debug, Default)]
+pub struct Extraction {
+    pub events: Vec<BusinessEvent>,
+    pub issues: Vec<Issue>,
+}
+
+/// Something in a message that Guss must not guess at.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Issue {
+    /// "30 x 650 = 18500": the stated total disagrees with quantity x price.
+    TotalMismatch {
+        what: String,
+        quantity: f64,
+        each: f64,
+        stated_total: f64,
+    },
+    /// A sale or expense with no amount at all.
+    MissingAmount { what: String },
+    /// Zero or negative price, amount or quantity.
+    NotPositive { what: String, value: f64 },
+}
+
+fn fmt_num(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{n:.0}")
+    } else {
+        format!("{n:.2}")
+    }
+}
+
+impl Issue {
+    pub fn message(&self, language: &str) -> String {
+        match (self, language) {
+            (
+                Issue::TotalMismatch {
+                    what,
+                    quantity,
+                    each,
+                    stated_total,
+                },
+                lang,
+            ) => {
+                let (q, e, s, t) = (
+                    fmt_num(*quantity),
+                    fmt_num(*each),
+                    fmt_num(*stated_total),
+                    fmt_num(quantity * each),
+                );
+                if lang == "id" {
+                    format!("{what}: {q} x {e} = {t}, bukan {s}. Mana yang benar?")
+                } else {
+                    format!("{what}: {q} x {e} = {t}, not {s}. Which is right?")
+                }
+            }
+            (Issue::MissingAmount { what }, "id") => format!("{what}: berapa harganya?"),
+            (Issue::MissingAmount { what }, _) => format!("{what}: how much was it?"),
+            (Issue::NotPositive { what, value }, "id") => {
+                format!(
+                    "{what}: {} tidak mungkin, harus lebih dari 0.",
+                    fmt_num(*value)
+                )
+            }
+            (Issue::NotPositive { what, value }, _) => {
+                format!(
+                    "{what}: {} can't be right, it must be more than 0.",
+                    fmt_num(*value)
+                )
+            }
+        }
+    }
+}
+
+/// Unit and total from what was said. The model never does arithmetic;
+/// this does, and refuses to pick a side when the two disagree.
+fn resolve(
+    what: &str,
+    quantity: f64,
+    each: Option<f64>,
+    total: Option<f64>,
+) -> Result<Option<f64>, Issue> {
+    let not_positive = |value: f64| Issue::NotPositive {
+        what: what.to_string(),
+        value,
+    };
+    if let Some(v) = each.into_iter().chain(total).find(|v| *v <= 0.0) {
+        return Err(not_positive(v));
+    }
+    match (each, total) {
+        (Some(each), Some(total)) => {
+            let computed = quantity * each;
+            // Half a percent, or one shilling/cent, of slack for rounding.
+            if (computed - total).abs() > (total * 0.005).max(1.0) {
+                return Err(Issue::TotalMismatch {
+                    what: what.to_string(),
+                    quantity,
+                    each,
+                    stated_total: total,
+                });
+            }
+            Ok(Some(each))
+        }
+        (Some(each), None) => Ok(Some(each)),
+        (None, Some(total)) if quantity > 0.0 => Ok(Some(total / quantity)),
+        (None, Some(total)) => Err(not_positive(total)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn to_business_event(
     event: ExtractedEvent,
     business_id: Uuid,
     source_channel: SourceChannel,
     raw_text: &str,
     default_currency: &str,
-) -> BusinessEvent {
+) -> Result<BusinessEvent, Issue> {
     let now = Utc::now();
-    match event {
+    Ok(match event {
         ExtractedEvent::Sale {
             item_name,
             quantity,
             unit_price_major,
+            total_major,
             currency,
             category,
-        } => BusinessEvent::Sale(Sale {
-            id: Uuid::new_v4(),
-            business_id,
-            item_name,
-            quantity,
-            unit_price: CurrencyAmount::new(
-                unit_price_major,
-                currency.unwrap_or_else(|| default_currency.to_string()),
-            ),
-            category,
-            occurred_at: now,
-            recurring: None,
-            source_channel,
-            raw_text: Some(raw_text.to_string()),
-        }),
+        } => {
+            if quantity <= 0.0 {
+                return Err(Issue::NotPositive {
+                    what: item_name,
+                    value: quantity,
+                });
+            }
+            let each =
+                resolve(&item_name, quantity, unit_price_major, total_major)?.ok_or_else(|| {
+                    Issue::MissingAmount {
+                        what: item_name.clone(),
+                    }
+                })?;
+            BusinessEvent::Sale(Sale {
+                id: Uuid::new_v4(),
+                business_id,
+                item_name,
+                quantity,
+                unit_price: CurrencyAmount::new(
+                    each,
+                    currency.unwrap_or_else(|| default_currency.to_string()),
+                ),
+                category,
+                occurred_at: now,
+                recurring: None,
+                source_channel,
+                raw_text: Some(raw_text.to_string()),
+            })
+        }
         ExtractedEvent::Expense {
             description,
             amount_major,
+            quantity,
+            unit_amount_major,
             currency,
             category,
-        } => BusinessEvent::Expense(Expense {
-            id: Uuid::new_v4(),
-            business_id,
-            description,
-            amount: CurrencyAmount::new(
-                amount_major,
-                currency.unwrap_or_else(|| default_currency.to_string()),
-            ),
-            category,
-            occurred_at: now,
-            recurring: None,
-            source_channel,
-            raw_text: Some(raw_text.to_string()),
-        }),
+        } => {
+            let qty = quantity.unwrap_or(1.0);
+            let each =
+                resolve(&description, qty, unit_amount_major, amount_major)?.ok_or_else(|| {
+                    Issue::MissingAmount {
+                        what: description.clone(),
+                    }
+                })?;
+            BusinessEvent::Expense(Expense {
+                id: Uuid::new_v4(),
+                business_id,
+                description,
+                amount: CurrencyAmount::new(
+                    qty * each,
+                    currency.unwrap_or_else(|| default_currency.to_string()),
+                ),
+                category,
+                occurred_at: now,
+                recurring: None,
+                source_channel,
+                raw_text: Some(raw_text.to_string()),
+            })
+        }
         ExtractedEvent::StockUpdate {
             item_name,
             delta,
             unit,
             unit_cost_major,
+            total_cost_major,
             reorder_threshold,
-        } => BusinessEvent::StockUpdate(StockUpdate {
-            id: Uuid::new_v4(),
-            business_id,
-            item_name,
-            delta,
-            unit,
-            unit_cost: unit_cost_major
-                .map(|c| CurrencyAmount::new(c, default_currency.to_string())),
-            reorder_threshold,
-            occurred_at: now,
-            source_channel,
-            raw_text: Some(raw_text.to_string()),
-        }),
+        } => {
+            let cost = resolve(&item_name, delta.abs(), unit_cost_major, total_cost_major)?;
+            BusinessEvent::StockUpdate(StockUpdate {
+                id: Uuid::new_v4(),
+                business_id,
+                item_name,
+                delta,
+                unit,
+                unit_cost: cost.map(|c| CurrencyAmount::new(c, default_currency.to_string())),
+                reorder_threshold,
+                occurred_at: now,
+                source_channel,
+                raw_text: Some(raw_text.to_string()),
+            })
+        }
         ExtractedEvent::Note { text } => BusinessEvent::Note(Note {
             id: Uuid::new_v4(),
             business_id,
@@ -189,7 +355,7 @@ fn to_business_event(
             occurred_at: now,
             source_channel,
         }),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -291,6 +457,108 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, NluError::Unparseable { .. }));
+    }
+
+    fn sale_json(each: Option<f64>, total: Option<f64>, qty: f64) -> Value {
+        json!({"events": [{"kind": "sale", "item_name": "rice", "quantity": qty,
+            "unit_price_major": each, "total_major": total, "currency": null, "category": null}]})
+    }
+
+    async fn checked(response: Value) -> Extraction {
+        let provider = ScriptedProvider {
+            responses: Mutex::new(vec![Ok(response)]),
+            calls: AtomicU32::new(0),
+        };
+        Nlu::new(provider, "en")
+            .extract_checked(Uuid::nil(), SourceChannel::Cli, "x", "KES", &[])
+            .await
+            .unwrap()
+    }
+
+    fn only_sale(x: &Extraction) -> &Sale {
+        match &x.events[..] {
+            [BusinessEvent::Sale(s)] => s,
+            other => panic!("expected one sale, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn total_only_is_divided_by_code_not_the_model() {
+        let x = checked(sale_json(None, Some(360.0), 3.0)).await;
+        assert!(x.issues.is_empty());
+        assert_eq!(only_sale(&x).unit_price.major_units(), 120.0);
+        assert_eq!(only_sale(&x).total().major_units(), 360.0);
+    }
+
+    #[tokio::test]
+    async fn agreeing_unit_and_total_pass() {
+        let x = checked(sale_json(Some(120.0), Some(360.0), 3.0)).await;
+        assert!(x.issues.is_empty());
+        assert_eq!(only_sale(&x).unit_price.major_units(), 120.0);
+    }
+
+    #[tokio::test]
+    async fn disagreeing_total_is_an_issue_and_nothing_is_kept() {
+        let x = checked(
+            json!({"events": [{"kind": "stock_update", "item_name": "tshirt",
+            "delta": 30.0, "unit": null, "unit_cost_major": 650.0, "total_cost_major": 18500.0,
+            "reorder_threshold": null}]}),
+        )
+        .await;
+        assert!(x.events.is_empty());
+        assert_eq!(
+            x.issues[0].message("en"),
+            "tshirt: 30 x 650 = 19500, not 18500. Which is right?"
+        );
+        assert_eq!(
+            x.issues[0].message("id"),
+            "tshirt: 30 x 650 = 19500, bukan 18500. Mana yang benar?"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_zero_and_negative_prices_are_issues() {
+        let x = checked(sale_json(None, None, 3.0)).await;
+        assert_eq!(
+            x.issues,
+            vec![Issue::MissingAmount {
+                what: "rice".into()
+            }]
+        );
+        let x = checked(sale_json(Some(0.0), None, 3.0)).await;
+        assert!(matches!(x.issues[0], Issue::NotPositive { .. }));
+        let x = checked(sale_json(Some(-120.0), None, 3.0)).await;
+        assert!(matches!(x.issues[0], Issue::NotPositive { .. }));
+    }
+
+    #[tokio::test]
+    async fn expense_from_count_and_price_each() {
+        let x = checked(
+            json!({"events": [{"kind": "expense", "description": "staff t-shirts",
+            "amount_major": null, "quantity": 30.0, "unit_amount_major": 650.0,
+            "currency": null, "category": null}]}),
+        )
+        .await;
+        match &x.events[..] {
+            [BusinessEvent::Expense(e)] => assert_eq!(e.amount.major_units(), 19500.0),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn restock_cost_from_total() {
+        let x = checked(
+            json!({"events": [{"kind": "stock_update", "item_name": "soda",
+            "delta": 2.0, "unit": "crate", "unit_cost_major": null, "total_cost_major": 2400.0,
+            "reorder_threshold": null}]}),
+        )
+        .await;
+        match &x.events[..] {
+            [BusinessEvent::StockUpdate(su)] => {
+                assert_eq!(su.unit_cost.as_ref().unwrap().major_units(), 1200.0)
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -31,6 +31,7 @@ struct MrrLineView {
 struct CurrencyTotalsView {
     revenue: String,
     expenses: String,
+    stock_bought: String,
     net_cash_basis: String,
 }
 
@@ -40,6 +41,8 @@ struct RenderContext {
     window_label: String,
     total_revenue: String,
     total_expenses: String,
+    /// None when nothing was paid for stock, so the line stays short.
+    stock_bought: Option<String>,
     net_cash_basis: String,
     other_currencies: Vec<CurrencyTotalsView>,
     gross_margin: Option<String>,
@@ -95,6 +98,8 @@ pub fn render_report(data: &ReportData, business_name: &str, language: &str) -> 
         window_label: window_label(data.window, lang_key),
         total_revenue: data.totals.revenue.to_string(),
         total_expenses: data.totals.expenses.to_string(),
+        stock_bought: (data.totals.stock_bought.amount.minor_units != 0)
+            .then(|| data.totals.stock_bought.to_string()),
         net_cash_basis: data.totals.net_cash_basis.to_string(),
         other_currencies: data
             .other_currency_totals
@@ -102,6 +107,7 @@ pub fn render_report(data: &ReportData, business_name: &str, language: &str) -> 
             .map(|t| CurrencyTotalsView {
                 revenue: t.revenue.to_string(),
                 expenses: t.expenses.to_string(),
+                stock_bought: t.stock_bought.to_string(),
                 net_cash_basis: t.net_cash_basis.to_string(),
             })
             .collect(),
@@ -153,6 +159,7 @@ mod tests {
             currency: currency.into(),
             revenue: CurrencyAmount::new(revenue, currency),
             expenses: CurrencyAmount::new(expenses, currency),
+            stock_bought: CurrencyAmount::new(0.0, currency),
             net_cash_basis: CurrencyAmount::new(revenue - expenses, currency),
         }
     }
@@ -218,6 +225,18 @@ mod tests {
         let id = render_report(&report, "Toko Acme", "id");
         assert!(id.contains("50.00 EUR"));
         assert!(id.contains("tidak dikonversi"));
+    }
+
+    #[test]
+    fn stock_bought_is_shown_only_when_there_was_some() {
+        let mut report = sample_report();
+        let en = render_report(&report, "Acme Shop", "en");
+        assert!(!en.contains("spent on stock"));
+        report.totals.stock_bought = CurrencyAmount::new(19500.0, "USD");
+        let en = render_report(&report, "Acme Shop", "en");
+        assert!(en.contains("19500.00 USD spent on stock"), "{en}");
+        let id = render_report(&report, "Toko Acme", "id");
+        assert!(id.contains("19500.00 USD untuk stok"), "{id}");
     }
 
     #[test]

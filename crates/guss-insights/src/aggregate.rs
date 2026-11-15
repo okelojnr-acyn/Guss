@@ -32,7 +32,9 @@ pub struct CurrencyTotals {
     pub currency: String,
     pub revenue: CurrencyAmount,
     pub expenses: CurrencyAmount,
-    /// Cash-basis revenue minus expenses.
+    /// Paid for stock bought to resell (restocks with a cost).
+    pub stock_bought: CurrencyAmount,
+    /// Cash basis: revenue minus expenses minus stock bought.
     pub net_cash_basis: CurrencyAmount,
 }
 
@@ -108,8 +110,8 @@ pub fn compute_report(
     let mut threshold_ever_set: HashMap<String, bool> = HashMap::new();
     // item -> (qty*cost_sum, qty_sum) for positive deltas with a business-currency cost
     let mut restock_cost_weighted: HashMap<String, (f64, f64)> = HashMap::new();
-    // currency -> (revenue_minor, expenses_minor)
-    let mut totals: HashMap<String, (i64, i64)> = HashMap::new();
+    // currency -> (revenue_minor, expenses_minor, stock_bought_minor)
+    let mut totals: HashMap<String, (i64, i64, i64)> = HashMap::new();
     // (label, currency) -> monthly major amount
     let mut recurring_revenue: HashMap<(String, String), f64> = HashMap::new();
     let mut recurring_expenses: HashMap<(String, String), f64> = HashMap::new();
@@ -157,6 +159,13 @@ pub fn compute_report(
                     .or_insert(0.0) += su.delta;
                 if su.reorder_threshold.is_some() {
                     threshold_ever_set.insert(su.item_name.clone(), true);
+                }
+                if su.delta > 0.0
+                    && let Some(cost) = &su.unit_cost
+                {
+                    let ccy = norm(&cost.currency);
+                    totals.entry(ccy).or_default().2 +=
+                        (su.delta * cost.amount.minor_units as f64).round() as i64;
                 }
                 if su.delta > 0.0
                     && let Some(cost) = &su.unit_cost
@@ -230,12 +239,13 @@ pub fn compute_report(
     declining_no_threshold.sort();
 
     let make_totals = |ccy: &str| -> CurrencyTotals {
-        let (rev, exp) = totals.get(ccy).copied().unwrap_or((0, 0));
+        let (rev, exp, stock) = totals.get(ccy).copied().unwrap_or((0, 0, 0));
         CurrencyTotals {
             currency: ccy.to_string(),
             revenue: amount(rev, ccy),
             expenses: amount(exp, ccy),
-            net_cash_basis: amount(rev - exp, ccy),
+            stock_bought: amount(stock, ccy),
+            net_cash_basis: amount(rev - exp - stock, ccy),
         }
     };
     let home_totals = make_totals(&home);
@@ -418,6 +428,27 @@ mod tests {
                 CurrencyAmount::new(360.0, "KES"),
                 CurrencyAmount::new(50.0, "USD")
             ]
+        );
+    }
+
+    #[test]
+    fn money_paid_for_stock_counts_against_net() {
+        // The owner's real day: transport, a subscription, 30 tshirts at 650.
+        let events = vec![
+            expense_in(500.0, "KES"),
+            expense_in(3124.0, "KES"),
+            restock_in("tshirt", 30.0, None, Some(650.0), "KES"),
+            restock_in("tshirt", -2.0, None, None, "KES"),
+        ];
+        let report = compute_report(&events, vec![], TimeWindow::Day, "KES");
+        assert_eq!(report.totals.expenses, CurrencyAmount::new(3624.0, "KES"));
+        assert_eq!(
+            report.totals.stock_bought,
+            CurrencyAmount::new(19500.0, "KES")
+        );
+        assert_eq!(
+            report.totals.net_cash_basis,
+            CurrencyAmount::new(-23124.0, "KES")
         );
     }
 

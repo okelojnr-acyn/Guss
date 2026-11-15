@@ -184,9 +184,9 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             .map(|d| format!("{}: {}", d.title, d.content))
             .collect();
 
-        let events = self
+        let extraction = self
             .nlu
-            .extract(
+            .extract_checked(
                 self.business.id,
                 source_channel,
                 text,
@@ -194,6 +194,12 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 &context_snippets,
             )
             .await?;
+        if !extraction.issues.is_empty() {
+            // Save nothing from a message Guss couldn't fully work out: half
+            // a message recorded is harder to fix than none.
+            return Ok(issues_reply(&extraction.issues, language));
+        }
+        let events = extraction.events;
 
         if events.is_empty() {
             return Ok(no_events_reply(language));
@@ -236,6 +242,10 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             self.store.save_event(event).await?;
             ids.push(event.id());
             lines.push(describe_event(event, &self.business.language));
+        }
+        if events.iter().all(|e| matches!(e, BusinessEvent::Note(_))) {
+            lines.push(String::new());
+            lines.push(notes_only_hint(&self.business.language).to_string());
         }
 
         {
@@ -338,14 +348,56 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
             "id" => format!("Pengeluaran: {} sebesar {}", e.description, e.amount),
             _ => format!("Expense: {} for {}", e.description, e.amount),
         },
-        BusinessEvent::StockUpdate(su) => match language {
-            "id" => format!("Stok {}: {:+}", su.item_name, su.delta),
+        BusinessEvent::StockUpdate(su) => match (&su.unit_cost, language) {
+            // A paid restock shows the arithmetic, so a wrong number is
+            // caught at a glance: "+30 at 650.00 KES = 19500.00 KES paid".
+            (Some(cost), lang) if su.delta > 0.0 => {
+                let paid =
+                    CurrencyAmount::new(su.delta * cost.major_units(), cost.currency.as_str());
+                if lang == "id" {
+                    format!(
+                        "Stok {}: {:+} @ {} = {} dibayar",
+                        su.item_name, su.delta, cost, paid
+                    )
+                } else {
+                    format!(
+                        "Stock {}: {:+} at {} = {} paid",
+                        su.item_name, su.delta, cost, paid
+                    )
+                }
+            }
+            (_, "id") => format!("Stok {}: {:+}", su.item_name, su.delta),
             _ => format!("Stock {}: {:+}", su.item_name, su.delta),
         },
         BusinessEvent::Note(n) => match language {
-            "id" => format!("Catatan: {}", n.text),
-            _ => format!("Note: {}", n.text),
+            "id" => format!("Catatan (tidak dihitung): {}", n.text),
+            _ => format!("Note (not counted): {}", n.text),
         },
+    }
+}
+
+fn issues_reply(issues: &[guss_nlu::Issue], language: &str) -> String {
+    let lines: Vec<String> = issues.iter().map(|i| i.message(language)).collect();
+    let body = lines.join("\n");
+    match language {
+        "id" => format!("{body}\n\nBelum ada yang disimpan. Kirim lagi dengan angka yang benar."),
+        _ => format!("{body}\n\nNothing was saved. Send it again with the right numbers."),
+    }
+}
+
+/// When a message only produced notes, say plainly that nothing was
+/// counted, with an example of how to say it so it is.
+fn notes_only_hint(language: &str) -> &'static str {
+    match language {
+        "id" => {
+            "Ini hanya disimpan sebagai catatan, tidak masuk penjualan atau pengeluaran. \
+             Kalau ini penjualan atau pembelian, kirim lagi, misalnya \"jual 3 beras 12000\" \
+             atau \"beli 30 kaos 65rb per biji\"."
+        }
+        _ => {
+            "Saved only as a note, not counted in sales or expenses. If it was a sale or a \
+             purchase, send it again, e.g. \"sold 3 rice at 120\" or \"bought 30 tshirts at 650 each\"."
+        }
     }
 }
 
@@ -601,6 +653,65 @@ mod tests {
         assert_eq!(
             saved_sales(&o).await,
             vec![CurrencyAmount::new(50.0, "KES")]
+        );
+    }
+
+    #[tokio::test]
+    async fn paid_restock_shows_the_arithmetic() {
+        let o = orchestrator(
+            json!({"events": [{"kind": "stock_update", "item_name": "tshirt", "delta": 30.0,
+                "unit": null, "unit_cost_major": 650.0, "total_cost_major": null,
+                "reorder_threshold": null}]}),
+            "en",
+            OtherCurrencyPolicy::Ask,
+        )
+        .await;
+        let reply = say(&o, "Bought 30 tshirts 650 each").await;
+        assert!(
+            reply.starts_with("Stock tshirt: +30 at 650.00 KES = 19500.00 KES paid"),
+            "{reply}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_total_saves_nothing_and_says_why() {
+        let o = orchestrator(
+            json!({"events": [
+                {"kind": "expense", "description": "delivery", "amount_major": 500.0,
+                 "quantity": null, "unit_amount_major": null, "currency": null, "category": null},
+                {"kind": "stock_update", "item_name": "tshirt", "delta": 30.0, "unit": null,
+                 "unit_cost_major": 650.0, "total_cost_major": 18500.0, "reorder_threshold": null}]}),
+            "en",
+            OtherCurrencyPolicy::Ask,
+        )
+        .await;
+        let reply = say(&o, "paid delivery 500, bought 30 tshirts at 650 = 18500").await;
+        assert!(reply.contains("30 x 650 = 19500, not 18500"), "{reply}");
+        assert!(reply.contains("Nothing was saved"), "{reply}");
+        let events = o
+            .store
+            .list_events(o.business.id, TimeWindow::Day)
+            .await
+            .unwrap();
+        assert!(events.is_empty(), "the delivery must not be half-saved");
+    }
+
+    #[tokio::test]
+    async fn a_note_alone_says_it_was_not_counted() {
+        let o = orchestrator(
+            json!({"events": [{"kind": "note", "text": "nought 30 tshirts"}]}),
+            "en",
+            OtherCurrencyPolicy::Ask,
+        )
+        .await;
+        let reply = say(&o, "nought 30 tshirts").await;
+        assert!(
+            reply.starts_with("Note (not counted): nought 30 tshirts"),
+            "{reply}"
+        );
+        assert!(
+            reply.contains("not counted in sales or expenses"),
+            "{reply}"
         );
     }
 
