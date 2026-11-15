@@ -67,6 +67,10 @@ pub struct ExtractedEvents {
     /// reporting what happened (then events is empty). Null otherwise.
     #[serde(default)]
     pub question: Option<Question>,
+    /// When it happened, if not today: 1 for "yesterday", 2 for "the day
+    /// before yesterday", 3 for "on Monday" three days ago. Null for today.
+    #[serde(default)]
+    pub days_ago: Option<u32>,
 }
 
 /// A question Guss answers from its own books (never stored).
