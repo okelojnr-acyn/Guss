@@ -1,4 +1,6 @@
 pub mod cli;
+pub mod friday;
+pub mod friday_sync;
 pub mod items;
 mod journal_texts;
 pub mod orchestrator;

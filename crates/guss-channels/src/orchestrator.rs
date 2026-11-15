@@ -419,6 +419,9 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         if let Some(v) = &e.voided {
             line.push_str(&texts::voided_suffix(&v.by, &v.reason, language));
         }
+        if let Some(err) = &e.sync_error {
+            line.push_str(&texts::not_in_friday(err, language));
+        }
         line
     }
 

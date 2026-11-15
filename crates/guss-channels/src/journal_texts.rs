@@ -155,3 +155,11 @@ pub fn longer_reports_not_allowed(language: &str) -> &'static str {
         "Week and month reports are for the owner and managers. /report shows today."
     }
 }
+
+pub fn not_in_friday(why: &str, language: &str) -> String {
+    if id(language) {
+        format!(" [belum di Friday: {why}]")
+    } else {
+        format!(" [not in Friday: {why}]")
+    }
+}

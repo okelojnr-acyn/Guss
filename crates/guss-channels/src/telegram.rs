@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use guss_core::domain::SourceChannel;
-use guss_core::people::{Action, Actor};
+use guss_core::people::{Action, Actor, Role};
 use guss_core::store::{Store, TimeWindow};
 use guss_llm::LlmProvider;
 use guss_scheduler::ReportSink;
@@ -15,6 +15,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::friday::FridayClient;
 use crate::orchestrator::{Notify, Orchestrator, Outcome};
 use crate::telegram_ux::{self, Command, TelegramAccess};
 use crate::voice_support::VoiceSupport;
@@ -91,6 +92,7 @@ pub async fn run<P, S>(
     voice: Arc<VoiceSupport>,
     bot_token: &str,
     access: TelegramAccess,
+    friday: Option<Arc<FridayClient>>,
 ) -> Result<(), TelegramError>
 where
     P: LlmProvider + Send + Sync + 'static,
@@ -150,9 +152,12 @@ where
                 let voice = voice.clone();
                 let bot = bot.clone();
                 let access = access.clone();
+                let friday = friday.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    if let Err(e) = handle_message(&orchestrator, &voice, &bot, &access, msg).await
+                    if let Err(e) =
+                        handle_message(&orchestrator, &voice, &bot, &access, friday.as_deref(), msg)
+                            .await
                     {
                         tracing::warn!(error = %e, "failed to handle Telegram message");
                     }
@@ -171,6 +176,7 @@ async fn handle_message<P, S>(
     voice: &VoiceSupport,
     bot: &Bot,
     access: &TelegramAccess,
+    friday: Option<&FridayClient>,
     msg: teloxide::types::Message,
 ) -> Result<(), TelegramError>
 where
@@ -198,7 +204,33 @@ where
         send_text(bot, chat_id, &telegram_ux::your_id(&language, user_id)).await?;
         return Ok(());
     }
-    let Some(role) = access.role_of(user_id) else {
+    if command == Some(Command::Link) {
+        let reply = match friday {
+            None => telegram_ux::link_unavailable(&language),
+            Some(f) => match f.link_code(user_id, &user.first_name).await {
+                Ok(code) => {
+                    f.refresh().await;
+                    telegram_ux::link_code(&language, &code)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "couldn't get a Friday link code");
+                    telegram_ux::link_failed(&language)
+                }
+            },
+        };
+        send_text(bot, chat_id, &reply).await?;
+        return Ok(());
+    }
+    let Some(role) = role_of(access, friday, user_id).await else {
+        if friday.is_some() {
+            send_text(
+                bot,
+                chat_id,
+                &telegram_ux::link_first(&language, &business_name),
+            )
+            .await?;
+            return Ok(());
+        }
         tracing::info!(user_id, "refused a message from a user who isn't allowed");
         send_text(
             bot,
@@ -275,7 +307,7 @@ where
             send_text(bot, chat_id, &telegram_ux::unknown_command(&language)).await?;
             return Ok(());
         }
-        Some(Command::Undo) | Some(Command::MyId) | None => {}
+        Some(Command::Undo) | Some(Command::MyId) | Some(Command::Link) | None => {}
     }
     let undo_text = (command == Some(Command::Undo)).then(|| "undo".to_string());
 
@@ -383,6 +415,31 @@ async fn transcribe_voice_note(
         .map_err(|e| TelegramError::Api(e.to_string()))
 }
 
+/// Who this Telegram user is. With Friday connected, Friday decides: a
+/// linked person has their Friday role (a viewer can't use Guss), and an
+/// unlinked one must /link first. The owner set in Guss's own settings
+/// always gets in, and if Friday can't be reached the configured ids
+/// apply, so nobody is locked out by an outage.
+async fn role_of(
+    access: &TelegramAccess,
+    friday: Option<&FridayClient>,
+    user_id: i64,
+) -> Option<Role> {
+    let Some(friday) = friday else {
+        return access.role_of(user_id);
+    };
+    if access.owner_chat_id == Some(user_id) {
+        return Some(Role::Owner);
+    }
+    match friday.people().await {
+        Ok(people) => people.by_telegram.get(&user_id).and_then(|p| p.role),
+        Err(e) => {
+            tracing::warn!(error = %e, "Friday unreachable; using the configured Telegram ids");
+            access.role_of(user_id)
+        }
+    }
+}
+
 /// Sends the reply, then the notices for other people: void requests to
 /// the owner and managers (not back to the person asking), decisions to
 /// the person who asked. A notice that can't be delivered is logged, never
@@ -485,10 +542,10 @@ mod tests {
             serde_json::from_value(sample_message_json(7, 42, "slow day today")).unwrap();
 
         let access = TelegramAccess::default();
-        handle_message(&orchestrator, &voice, &bot, &access, message.clone())
+        handle_message(&orchestrator, &voice, &bot, &access, None, message.clone())
             .await
             .unwrap();
-        handle_message(&orchestrator, &voice, &bot, &access, message)
+        handle_message(&orchestrator, &voice, &bot, &access, None, message)
             .await
             .unwrap();
 
@@ -531,6 +588,7 @@ mod tests {
             &VoiceSupport::default(),
             &bot,
             &access,
+            None,
             message,
         )
         .await
@@ -570,6 +628,7 @@ mod tests {
             &VoiceSupport::default(),
             &bot,
             &access,
+            None,
             message,
         )
         .await

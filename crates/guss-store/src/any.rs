@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::people::Actor;
-use guss_core::store::{JournalEntry, StockLevel, Store, StoreError, TimeWindow, VoidRequest};
+use guss_core::store::{
+    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest,
+};
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -92,6 +94,35 @@ impl Store for AnyStore {
             AnyStore::Sqlite(s) => s.journal_entry(business_id, number).await,
             #[cfg(feature = "postgres")]
             AnyStore::Postgres(s) => s.journal_entry(business_id, number).await,
+        }
+    }
+
+    async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.to_sync(business_id, limit).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.to_sync(business_id, limit).await,
+        }
+    }
+
+    async fn mark_synced(&self, id: Uuid, reverse: bool) -> Result<(), StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.mark_synced(id, reverse).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.mark_synced(id, reverse).await,
+        }
+    }
+
+    async fn mark_sync_failed(
+        &self,
+        id: Uuid,
+        error: &str,
+        permanent: bool,
+    ) -> Result<(), StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.mark_sync_failed(id, error, permanent).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.mark_sync_failed(id, error, permanent).await,
         }
     }
 

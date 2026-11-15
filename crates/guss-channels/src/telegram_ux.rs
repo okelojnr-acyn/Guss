@@ -86,6 +86,8 @@ pub enum Command {
     Pending,
     Approve(Option<String>),
     Reject(Option<String>),
+    /// Link this Telegram account to the person's Friday account.
+    Link,
     Unknown,
 }
 
@@ -109,6 +111,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "pending" | "menunggu" => Command::Pending,
         "approve" | "setujui" => Command::Approve(arg),
         "reject" | "tolak" => Command::Reject(arg),
+        "link" | "tautkan" => Command::Link,
         _ => Command::Unknown,
     })
 }
@@ -131,6 +134,50 @@ pub fn number_and_rest(arg: Option<&str>) -> Option<(i64, String)> {
     let mut parts = arg.splitn(2, char::is_whitespace);
     let number = parts.next()?.trim_start_matches('#').parse().ok()?;
     Some((number, parts.next().unwrap_or("").trim().to_string()))
+}
+
+pub fn link_code(language: &str, code: &str) -> String {
+    if is_id(language) {
+        format!(
+            "Kode Anda: {code}\n\nBuka Friday: Pengaturan, Integrasi, Guss, Tautkan Telegram, lalu \
+             masukkan kode ini dalam 10 menit. Setelah itu peran Anda di Friday berlaku di sini."
+        )
+    } else {
+        format!(
+            "Your code: {code}\n\nOpen Friday: Settings, Integrations, Guss, Link your Telegram, and \
+             enter it within 10 minutes. After that your Friday role applies here."
+        )
+    }
+}
+
+pub fn link_unavailable(language: &str) -> String {
+    if is_id(language) {
+        "Guss ini belum terhubung ke Friday.".to_string()
+    } else {
+        "This Guss isn't connected to Friday.".to_string()
+    }
+}
+
+pub fn link_failed(language: &str) -> String {
+    if is_id(language) {
+        "Tidak bisa mengambil kode dari Friday sekarang. Coba lagi sebentar lagi.".to_string()
+    } else {
+        "Couldn't get a code from Friday right now. Try again in a minute.".to_string()
+    }
+}
+
+/// Refusal when Friday decides who may use Guss and this person isn't
+/// linked (or is a viewer there).
+pub fn link_first(language: &str, business: &str) -> String {
+    if is_id(language) {
+        format!(
+            "Halo! Ini asisten toko {business}. Kirim /link untuk menautkan akun Friday Anda dulu."
+        )
+    } else {
+        format!(
+            "Hi! This is {business}'s shop assistant. Send /link to connect your Friday account first."
+        )
+    }
 }
 
 pub fn void_usage(language: &str) -> String {

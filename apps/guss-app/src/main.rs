@@ -192,6 +192,40 @@ async fn main() {
     let nlu = Nlu::new(provider, business.language.clone());
     let voice = Arc::new(build_voice_support(&config, &business.language));
     let scheduler_store = store.clone();
+    let friday = match (
+        config
+            .friday
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        config
+            .friday
+            .key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(url), Some(key)) => {
+            let client = Arc::new(guss_channels::friday::FridayClient::new(url, key));
+            let (sync_client, sync_store, business_id) =
+                (client.clone(), store.clone(), business.id);
+            tokio::spawn(async move {
+                guss_channels::friday_sync::run(sync_store.as_ref(), &sync_client, business_id)
+                    .await;
+            });
+            tracing::info!(
+                url,
+                "connected to Friday: roles from Friday, entries sent to Inventory"
+            );
+            Some(client)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::warn!("set both GUSS_FRIDAY__URL and GUSS_FRIDAY__KEY to connect to Friday");
+            None
+        }
+        (None, None) => None,
+    };
     let scheduler_business = business.clone();
     let other_currency_policy = config
         .business
@@ -293,7 +327,7 @@ async fn main() {
                 manager_user_ids,
                 allowed_user_ids,
             };
-            if let Err(e) = telegram::run(orchestrator, voice, token, access).await {
+            if let Err(e) = telegram::run(orchestrator, voice, token, access, friday).await {
                 eprintln!("Telegram channel exited with an error: {e}");
                 std::process::exit(1);
             }

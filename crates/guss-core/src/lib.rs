@@ -6,4 +6,6 @@ pub mod store;
 pub use domain::*;
 pub use money::{CurrencyAmount, Money};
 pub use people::{Action, Actor, Role};
-pub use store::{JournalEntry, StockLevel, Store, StoreError, TimeWindow, VoidRequest, Voided};
+pub use store::{
+    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest, Voided,
+};

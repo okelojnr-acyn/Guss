@@ -47,8 +47,20 @@ pub struct JournalEntry {
     pub number: i64,
     pub event: BusinessEvent,
     pub recorded_by: Option<String>,
+    /// "telegram:12345", "web", ... (who to act as when syncing).
+    pub recorded_by_id: Option<String>,
     pub recorded_by_role: Option<Role>,
     pub voided: Option<Voided>,
+    /// Why this entry isn't in Friday (yet), if it isn't.
+    pub sync_error: Option<String>,
+}
+
+/// An entry to send to Friday: record it, or reverse it (voided after it
+/// was sent).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncItem {
+    pub entry: JournalEntry,
+    pub reverse: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +107,19 @@ pub trait Store: Send + Sync {
         business_id: Uuid,
         number: i64,
     ) -> Result<Option<JournalEntry>, StoreError>;
+
+    /// Sales and stock updates not yet in Friday, and voided ones whose
+    /// reversal isn't, oldest first.
+    async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError>;
+    async fn mark_synced(&self, id: Uuid, reverse: bool) -> Result<(), StoreError>;
+    /// `permanent`: never retried (shown in /history); otherwise kept for
+    /// the next attempt.
+    async fn mark_sync_failed(
+        &self,
+        id: Uuid,
+        error: &str,
+        permanent: bool,
+    ) -> Result<(), StoreError>;
 
     /// Returns the request's number.
     async fn request_void(

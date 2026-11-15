@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::people::{Actor, Role};
 use guss_core::store::{
-    JournalEntry, StockLevel, Store, StoreError, TimeWindow, VoidRequest, Voided,
+    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest, Voided,
 };
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -45,6 +45,8 @@ fn journal_from_row(row: sqlx::postgres::PgRow) -> Result<JournalEntry, StoreErr
         number: row.get("number"),
         event,
         recorded_by: row.get("recorded_by_name"),
+        recorded_by_id: row.get("recorded_by_id"),
+        sync_error: row.get("sync_error"),
         recorded_by_role: row
             .get::<Option<String>, _>("recorded_by_role")
             .as_deref()
@@ -157,7 +159,7 @@ impl Store for PostgresStore {
         limit: i64,
     ) -> Result<Vec<JournalEntry>, StoreError> {
         let rows = sqlx::query(
-            "SELECT seq AS number, payload, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason FROM events WHERE business_id = $1 ORDER BY seq DESC LIMIT $2",
+            "SELECT seq AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error FROM events WHERE business_id = $1 ORDER BY seq DESC LIMIT $2",
         )
         .bind(business_id.to_string())
         .bind(limit)
@@ -173,7 +175,7 @@ impl Store for PostgresStore {
         number: i64,
     ) -> Result<Option<JournalEntry>, StoreError> {
         let row = sqlx::query(
-            "SELECT seq AS number, payload, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason FROM events WHERE business_id = $1 AND seq = $2",
+            "SELECT seq AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error FROM events WHERE business_id = $1 AND seq = $2",
         )
         .bind(business_id.to_string())
         .bind(number)
@@ -181,6 +183,61 @@ impl Store for PostgresStore {
         .await
         .map_err(db_err)?;
         row.map(journal_from_row).transpose()
+    }
+
+    async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT seq AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error, (voided_at IS NOT NULL) AS reverse FROM events WHERE business_id = $1 AND kind IN ('sale', 'stock_update') AND ((synced_at IS NULL AND voided_at IS NULL) OR (voided_at IS NOT NULL AND synced_at IS NOT NULL AND synced_at <> 'skipped' AND void_synced_at IS NULL)) ORDER BY seq LIMIT $2",
+        )
+        .bind(business_id.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter()
+            .map(|row| {
+                let reverse: bool = row.get("reverse");
+                Ok(SyncItem {
+                    entry: journal_from_row(row)?,
+                    reverse,
+                })
+            })
+            .collect()
+    }
+
+    async fn mark_synced(&self, id: Uuid, reverse: bool) -> Result<(), StoreError> {
+        let sql = if reverse {
+            "UPDATE events SET void_synced_at = $1, sync_error = NULL WHERE id = $2"
+        } else {
+            "UPDATE events SET synced_at = $1, sync_error = NULL WHERE id = $2"
+        };
+        sqlx::query(sql)
+            .bind(Utc::now().to_rfc3339())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn mark_sync_failed(
+        &self,
+        id: Uuid,
+        error: &str,
+        permanent: bool,
+    ) -> Result<(), StoreError> {
+        let sql = if permanent {
+            "UPDATE events SET sync_error = $1, synced_at = COALESCE(synced_at, 'skipped'), void_synced_at = CASE WHEN synced_at IS NULL THEN void_synced_at ELSE COALESCE(void_synced_at, 'skipped') END WHERE id = $2"
+        } else {
+            "UPDATE events SET sync_error = $1 WHERE id = $2"
+        };
+        sqlx::query(sql)
+            .bind(error)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
     }
 
     async fn request_void(

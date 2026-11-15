@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
 use guss_core::people::{Actor, Role};
 use guss_core::store::{
-    JournalEntry, StockLevel, Store, StoreError, TimeWindow, VoidRequest, Voided,
+    JournalEntry, StockLevel, Store, StoreError, SyncItem, TimeWindow, VoidRequest, Voided,
 };
 use sqlx::Row;
 use std::str::FromStr;
@@ -47,6 +47,8 @@ fn journal_from_row(row: sqlx::sqlite::SqliteRow) -> Result<JournalEntry, StoreE
         number: row.get("number"),
         event,
         recorded_by: row.get("recorded_by_name"),
+        recorded_by_id: row.get("recorded_by_id"),
+        sync_error: row.get("sync_error"),
         recorded_by_role: row
             .get::<Option<String>, _>("recorded_by_role")
             .as_deref()
@@ -187,7 +189,7 @@ impl Store for SqliteStore {
         limit: i64,
     ) -> Result<Vec<JournalEntry>, StoreError> {
         let rows = sqlx::query(
-            "SELECT rowid AS number, payload, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason FROM events WHERE business_id = ? ORDER BY rowid DESC LIMIT ?",
+            "SELECT rowid AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error FROM events WHERE business_id = ? ORDER BY rowid DESC LIMIT ?",
         )
         .bind(business_id.to_string())
         .bind(limit)
@@ -203,7 +205,7 @@ impl Store for SqliteStore {
         number: i64,
     ) -> Result<Option<JournalEntry>, StoreError> {
         let row = sqlx::query(
-            "SELECT rowid AS number, payload, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason FROM events WHERE business_id = ? AND rowid = ?",
+            "SELECT rowid AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error FROM events WHERE business_id = ? AND rowid = ?",
         )
         .bind(business_id.to_string())
         .bind(number)
@@ -211,6 +213,61 @@ impl Store for SqliteStore {
         .await
         .map_err(db_err)?;
         row.map(journal_from_row).transpose()
+    }
+
+    async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT rowid AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error, (voided_at IS NOT NULL) AS reverse FROM events WHERE business_id = ? AND kind IN ('sale', 'stock_update') AND ((synced_at IS NULL AND voided_at IS NULL) OR (voided_at IS NOT NULL AND synced_at IS NOT NULL AND synced_at <> 'skipped' AND void_synced_at IS NULL)) ORDER BY rowid LIMIT ?",
+        )
+        .bind(business_id.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter()
+            .map(|row| {
+                let reverse: bool = row.get("reverse");
+                Ok(SyncItem {
+                    entry: journal_from_row(row)?,
+                    reverse,
+                })
+            })
+            .collect()
+    }
+
+    async fn mark_synced(&self, id: Uuid, reverse: bool) -> Result<(), StoreError> {
+        let sql = if reverse {
+            "UPDATE events SET void_synced_at = ?, sync_error = NULL WHERE id = ?"
+        } else {
+            "UPDATE events SET synced_at = ?, sync_error = NULL WHERE id = ?"
+        };
+        sqlx::query(sql)
+            .bind(Utc::now().to_rfc3339())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn mark_sync_failed(
+        &self,
+        id: Uuid,
+        error: &str,
+        permanent: bool,
+    ) -> Result<(), StoreError> {
+        let sql = if permanent {
+            "UPDATE events SET sync_error = ?, synced_at = COALESCE(synced_at, 'skipped'), void_synced_at = CASE WHEN synced_at IS NULL THEN void_synced_at ELSE COALESCE(void_synced_at, 'skipped') END WHERE id = ?"
+        } else {
+            "UPDATE events SET sync_error = ? WHERE id = ?"
+        };
+        sqlx::query(sql)
+            .bind(error)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
     }
 
     async fn request_void(
@@ -736,6 +793,51 @@ mod tests {
         store.void_event(event_id, &mary, "again").await.unwrap();
         let journal = store.journal(business_id, 10).await.unwrap();
         assert_eq!(journal[0].voided.as_ref().unwrap().by, "Boss");
+    }
+
+    #[tokio::test]
+    async fn sync_queue_records_then_reverses_and_skips() {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        let business_id = Uuid::new_v4();
+        let boss = Actor::new("telegram:2", "Boss", Role::Owner);
+        let rice = restock(business_id, "rice", 10.0, None);
+        let soap = restock(business_id, "soap", 5.0, None);
+        store.save_event_by(&rice, Some(&boss)).await.unwrap();
+        store.save_event_by(&soap, Some(&boss)).await.unwrap();
+
+        let queue = store.to_sync(business_id, 10).await.unwrap();
+        assert_eq!(queue.len(), 2);
+        assert!(!queue[0].reverse);
+        assert_eq!(queue[0].entry.recorded_by_id.as_deref(), Some("telegram:2"));
+
+        // A transient failure keeps it queued; a permanent one doesn't.
+        store
+            .mark_sync_failed(rice.id(), "timeout", false)
+            .await
+            .unwrap();
+        store
+            .mark_sync_failed(soap.id(), "no write access", true)
+            .await
+            .unwrap();
+        let queue = store.to_sync(business_id, 10).await.unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].entry.sync_error.as_deref(), Some("timeout"));
+
+        store.mark_synced(rice.id(), false).await.unwrap();
+        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
+
+        // Voiding a synced entry queues its reversal; a skipped one never.
+        store.void_event(rice.id(), &boss, "x").await.unwrap();
+        store.void_event(soap.id(), &boss, "x").await.unwrap();
+        let queue = store.to_sync(business_id, 10).await.unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(queue[0].reverse);
+        store.mark_synced(rice.id(), true).await.unwrap();
+        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
+
+        let journal = store.journal(business_id, 10).await.unwrap();
+        let soap_entry = journal.iter().find(|e| e.event.id() == soap.id()).unwrap();
+        assert_eq!(soap_entry.sync_error.as_deref(), Some("no write access"));
     }
 
     #[tokio::test]

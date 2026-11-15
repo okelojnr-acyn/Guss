@@ -209,6 +209,18 @@ pub struct AppConfig {
     pub channel: ChannelConfig,
     #[serde(default)]
     pub web: WebConfig,
+    #[serde(default)]
+    pub friday: FridayConfig,
+}
+
+/// Guss inside Friday: the Friday API address (its kernel) and the key an
+/// admin creates in Friday (Integrations, Guss). With both set, Friday
+/// decides who may use Guss and their roles, and entries are sent to
+/// Friday Inventory.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FridayConfig {
+    pub url: Option<String>,
+    pub key: Option<String>,
 }
 
 /// The HTTP API other apps (the Friday widget) use. Off unless a token is
