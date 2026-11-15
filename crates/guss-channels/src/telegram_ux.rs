@@ -3,6 +3,7 @@
 //! and who may use the bot at all. Every user-facing string exists in
 //! `en` and `id`.
 
+use guss_core::people::Role;
 use teloxide::prelude::*;
 use teloxide::types::BotCommand;
 
@@ -12,18 +13,44 @@ use teloxide::types::BotCommand;
 #[derive(Debug, Clone, Default)]
 pub struct TelegramAccess {
     pub owner_chat_id: Option<i64>,
+    /// Can approve voids and see longer reports (Friday's chain of command).
+    pub manager_user_ids: Vec<i64>,
+    /// Staff: record entries and see today's report.
     pub allowed_user_ids: Vec<i64>,
 }
 
 impl TelegramAccess {
     pub fn is_open(&self) -> bool {
-        self.owner_chat_id.is_none() && self.allowed_user_ids.is_empty()
+        self.owner_chat_id.is_none()
+            && self.manager_user_ids.is_empty()
+            && self.allowed_user_ids.is_empty()
+    }
+
+    /// A user's role, or None if they may not use the bot. An open bot
+    /// (nothing configured yet) treats everyone as the owner: that's the
+    /// one person setting it up.
+    pub fn role_of(&self, user_id: i64) -> Option<Role> {
+        if self.is_open() || self.owner_chat_id == Some(user_id) {
+            Some(Role::Owner)
+        } else if self.manager_user_ids.contains(&user_id) {
+            Some(Role::Manager)
+        } else if self.allowed_user_ids.contains(&user_id) {
+            Some(Role::Staff)
+        } else {
+            None
+        }
     }
 
     pub fn allows(&self, user_id: i64) -> bool {
-        self.is_open()
-            || self.owner_chat_id == Some(user_id)
-            || self.allowed_user_ids.contains(&user_id)
+        self.role_of(user_id).is_some()
+    }
+
+    /// Chats that hear about void requests: the owner and managers.
+    pub fn approver_chats(&self) -> Vec<i64> {
+        self.owner_chat_id
+            .into_iter()
+            .chain(self.manager_user_ids.iter().copied())
+            .collect()
     }
 
     /// Parses "123, 456" (the env form); returns the ids and any entries
@@ -53,6 +80,12 @@ pub enum Command {
     Report(Option<String>),
     Undo,
     MyId,
+    History,
+    /// "/void 12 double entry": the entry number and the reason.
+    Void(Option<String>),
+    Pending,
+    Approve(Option<String>),
+    Reject(Option<String>),
     Unknown,
 }
 
@@ -63,7 +96,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
     let word = parts.next()?.split('@').next()?.to_lowercase();
     let arg = parts
         .next()
-        .map(|a| a.trim().to_lowercase())
+        .map(|a| a.trim().to_string())
         .filter(|a| !a.is_empty());
     Some(match word.as_str() {
         "start" => Command::Start,
@@ -71,6 +104,11 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "report" | "laporan" => Command::Report(arg),
         "undo" | "batal" => Command::Undo,
         "myid" | "idsaya" => Command::MyId,
+        "history" | "riwayat" => Command::History,
+        "void" | "hapus" => Command::Void(arg),
+        "pending" | "menunggu" => Command::Pending,
+        "approve" | "setujui" => Command::Approve(arg),
+        "reject" | "tolak" => Command::Reject(arg),
         _ => Command::Unknown,
     })
 }
@@ -78,11 +116,38 @@ pub fn parse_command(text: &str) -> Option<Command> {
 /// "today"/"week"/"month" (and Indonesian) -> report window; None = today.
 pub fn report_window(arg: Option<&str>) -> Option<guss_core::store::TimeWindow> {
     use guss_core::store::TimeWindow;
-    match arg {
+    let arg = arg.map(str::to_lowercase);
+    match arg.as_deref() {
         None | Some("today" | "day" | "hari" | "hariini") => Some(TimeWindow::Day),
         Some("week" | "minggu") => Some(TimeWindow::Week),
         Some("month" | "bulan") => Some(TimeWindow::Month),
         Some(_) => None,
+    }
+}
+
+/// "12 double entry" -> (12, "double entry"); "#12" works too.
+pub fn number_and_rest(arg: Option<&str>) -> Option<(i64, String)> {
+    let arg = arg?.trim();
+    let mut parts = arg.splitn(2, char::is_whitespace);
+    let number = parts.next()?.trim_start_matches('#').parse().ok()?;
+    Some((number, parts.next().unwrap_or("").trim().to_string()))
+}
+
+pub fn void_usage(language: &str) -> String {
+    if is_id(language) {
+        "Tulis nomor catatan dan alasannya, misalnya: /void 12 tercatat dua kali. Nomor ada di /history."
+            .to_string()
+    } else {
+        "Give the entry number and why, e.g. /void 12 recorded twice. Numbers are in /history."
+            .to_string()
+    }
+}
+
+pub fn decide_usage(language: &str) -> String {
+    if is_id(language) {
+        "Tulis nomor permintaan, misalnya /approve 3. Lihat /pending.".to_string()
+    } else {
+        "Give the request number, e.g. /approve 3. See /pending.".to_string()
     }
 }
 
@@ -111,7 +176,9 @@ pub fn help(language: &str) -> String {
          • bayar 500 untuk transport\n\
          • stok masuk 20 soda\n\n\
          Saya akan mengonfirmasi yang saya catat. Salah? Balas \"batal\" atau /undo dalam 5 menit.\n\n\
-         /report menampilkan penjualan hari ini (/report minggu, /report bulan)."
+         /report menampilkan penjualan hari ini (/report minggu, /report bulan).\n\n\
+         /history menampilkan catatan terakhir dengan nomornya. Catatan yang salah setelah 5 menit: \
+         /void 12 alasannya. Tidak ada yang dihapus; pemilik atau manajer menyetujui."
             .to_string()
     } else {
         "Just tell me what happened, the way you'd text a colleague:\n\
@@ -119,7 +186,9 @@ pub fn help(language: &str) -> String {
          • paid 500 for transport\n\
          • restocked 20 sodas\n\n\
          I'll confirm what I recorded. A mistake? Reply \"no\" or /undo within 5 minutes.\n\n\
-         /report shows today's sales (/report week, /report month)."
+         /report shows today's sales (/report week, /report month).\n\n\
+         /history lists the latest entries with their numbers. A wrong entry after 5 minutes: \
+         /void 12 the reason. Nothing is deleted; the owner or a manager approves."
             .to_string()
     }
 }
@@ -211,6 +280,21 @@ fn commands(language: &str) -> Vec<BotCommand> {
             "Take back the last entry",
             "Batalkan catatan terakhir",
         ),
+        c(
+            "history",
+            "Latest entries with their numbers",
+            "Catatan terakhir dengan nomornya",
+        ),
+        c(
+            "void",
+            "Stop an entry counting: /void 12 reason",
+            "Batalkan catatan: /void 12 alasan",
+        ),
+        c(
+            "pending",
+            "Void requests to approve",
+            "Permintaan pembatalan untuk disetujui",
+        ),
         c("help", "How to use me", "Cara memakai saya"),
         c(
             "myid",
@@ -261,6 +345,7 @@ mod tests {
         let open = TelegramAccess::default();
         assert!(open.is_open() && open.allows(1));
         let owned = TelegramAccess {
+            manager_user_ids: vec![],
             owner_chat_id: Some(10),
             allowed_user_ids: vec![20],
         };
@@ -268,6 +353,41 @@ mod tests {
         let (ids, bad) = TelegramAccess::parse_ids(" 20, 30;x  40 ");
         assert_eq!(ids, vec![20, 30, 40]);
         assert_eq!(bad, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn roles_follow_the_configured_ids() {
+        let access = TelegramAccess {
+            owner_chat_id: Some(10),
+            manager_user_ids: vec![15],
+            allowed_user_ids: vec![20],
+        };
+        assert_eq!(access.role_of(10), Some(Role::Owner));
+        assert_eq!(access.role_of(15), Some(Role::Manager));
+        assert_eq!(access.role_of(20), Some(Role::Staff));
+        assert_eq!(access.role_of(30), None);
+        assert_eq!(access.approver_chats(), vec![10, 15]);
+        assert_eq!(TelegramAccess::default().role_of(99), Some(Role::Owner));
+    }
+
+    #[test]
+    fn journal_commands_parse() {
+        assert_eq!(
+            parse_command("/void 12 Recorded Twice"),
+            Some(Command::Void(Some("12 Recorded Twice".into())))
+        );
+        assert_eq!(parse_command("/history"), Some(Command::History));
+        assert_eq!(
+            parse_command("/setujui 3"),
+            Some(Command::Approve(Some("3".into())))
+        );
+        assert_eq!(
+            number_and_rest(Some("#12 recorded twice")),
+            Some((12, "recorded twice".into()))
+        );
+        assert_eq!(number_and_rest(Some("12")), Some((12, String::new())));
+        assert_eq!(number_and_rest(Some("twelve")), None);
+        assert_eq!(number_and_rest(None), None);
     }
 
     #[test]

@@ -4,12 +4,14 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, SourceChannel};
 use guss_core::money::CurrencyAmount;
-use guss_core::store::{Store, StoreError, TimeWindow};
+use guss_core::people::{Action, Actor};
+use guss_core::store::{JournalEntry, Store, StoreError, TimeWindow};
 use guss_insights::{build_report, render_report};
 use guss_llm::LlmProvider;
 use guss_nlu::{Nlu, NluError, extract_keywords};
 
 use crate::items::{self, Catalog, UnitQuestion};
+use crate::journal_texts as texts;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -85,6 +87,30 @@ pub enum OrchestratorError {
     VoiceNotConfigured(String),
 }
 
+/// A reply plus messages for other people (delivered by the channel).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outcome {
+    pub reply: String,
+    pub notify: Vec<Notify>,
+}
+
+impl Outcome {
+    fn reply(text: impl Into<String>) -> Self {
+        Self {
+            reply: text.into(),
+            notify: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Notify {
+    /// Everyone who can decide void requests (owner and managers).
+    Approvers(String),
+    /// One person, by actor id ("telegram:12345").
+    Person(String, String),
+}
+
 struct PendingCommit {
     event_ids: Vec<Uuid>,
     committed_at: DateTime<Utc>,
@@ -125,10 +151,24 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         &self.business
     }
 
-    /// Handles one inbound message: either an undo command, or free text
-    /// to extract business events from. Returns the reply text.
+    /// Handles one inbound message as the owner (CLI, and channels that
+    /// don't know their people yet).
     pub async fn handle_message(
         &self,
+        conversation_key: &str,
+        source_channel: SourceChannel,
+        text: &str,
+    ) -> Result<String, OrchestratorError> {
+        let actor = Actor::owner(source_channel_tag(source_channel));
+        self.handle_message_as(&actor, conversation_key, source_channel, text)
+            .await
+    }
+
+    /// Handles one inbound message from `actor`: either an undo command, or
+    /// free text to extract business events from. Returns the reply text.
+    pub async fn handle_message_as(
+        &self,
+        actor: &Actor,
         conversation_key: &str,
         source_channel: SourceChannel,
         text: &str,
@@ -148,11 +188,11 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 Question::Currency { foreign } => {
                     let answer = trimmed.to_uppercase();
                     if foreign.contains(&answer) || KEEP_WORDS.contains(&trimmed.as_str()) {
-                        return self.commit(conversation_key, h.events).await;
+                        return self.commit(actor, conversation_key, h.events).await;
                     }
                     if answer == home {
                         return self
-                            .commit(conversation_key, to_currency(h.events, &home))
+                            .commit(actor, conversation_key, to_currency(h.events, &home))
                             .await;
                     }
                     dropped_note = Some(currency_dropped_note(&foreign, language));
@@ -160,7 +200,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 Question::Unit(q) => {
                     if let Some(count) = items::parse_count(&trimmed) {
                         self.learn_unit(&q, count).await?;
-                        return self.prepare(conversation_key, h.events, &home).await;
+                        return self.prepare(actor, conversation_key, h.events, &home).await;
                     }
                     dropped_note = Some(unit_dropped_note(&q.item, language));
                 }
@@ -170,11 +210,11 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         }
 
         if UNDO_WORDS.contains(&trimmed.as_str()) {
-            return self.handle_undo(conversation_key).await;
+            return self.handle_undo(actor, conversation_key).await;
         }
 
         let reply = self
-            .extract_and_commit(conversation_key, source_channel, text, &home)
+            .extract_and_commit(actor, conversation_key, source_channel, text, &home)
             .await?;
         Ok(match dropped_note {
             Some(note) => format!("{note}\n{reply}"),
@@ -188,6 +228,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
 
     async fn extract_and_commit(
         &self,
+        actor: &Actor,
         conversation_key: &str,
         source_channel: SourceChannel,
         text: &str,
@@ -227,7 +268,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         if events.is_empty() {
             return Ok(no_events_reply(language));
         }
-        self.prepare(conversation_key, events, home).await
+        self.prepare(actor, conversation_key, events, home).await
     }
 
     async fn catalog(&self) -> Result<Catalog, OrchestratorError> {
@@ -250,6 +291,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
     /// settle (holding everything), otherwise saves.
     async fn prepare(
         &self,
+        actor: &Actor,
         conversation_key: &str,
         mut events: Vec<BusinessEvent>,
         home: &str,
@@ -264,12 +306,12 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
 
         let foreign = foreign_currencies(&events, home);
         if foreign.is_empty() {
-            return self.commit(conversation_key, events).await;
+            return self.commit(actor, conversation_key, events).await;
         }
         match self.other_currency_policy {
-            OtherCurrencyPolicy::Allow => self.commit(conversation_key, events).await,
+            OtherCurrencyPolicy::Allow => self.commit(actor, conversation_key, events).await,
             OtherCurrencyPolicy::UseBusinessCurrency => {
-                self.commit(conversation_key, to_currency(events, home))
+                self.commit(actor, conversation_key, to_currency(events, home))
                     .await
             }
             OtherCurrencyPolicy::Ask => {
@@ -295,6 +337,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
     /// Saves events and opens the undo window for them.
     async fn commit(
         &self,
+        actor: &Actor,
         conversation_key: &str,
         events: Vec<BusinessEvent>,
     ) -> Result<String, OrchestratorError> {
@@ -305,7 +348,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         let mut ids = Vec::with_capacity(events.len());
         let mut lines = Vec::with_capacity(events.len());
         for event in &events {
-            self.store.save_event(event).await?;
+            self.store.save_event_by(event, Some(actor)).await?;
             ids.push(event.id());
             lines.push(describe_event(event, &self.business.language));
         }
@@ -328,7 +371,11 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         Ok(confirmation_reply(&lines, &self.business.language))
     }
 
-    async fn handle_undo(&self, conversation_key: &str) -> Result<String, OrchestratorError> {
+    async fn handle_undo(
+        &self,
+        actor: &Actor,
+        conversation_key: &str,
+    ) -> Result<String, OrchestratorError> {
         let entry = {
             let mut pending = self.pending.lock().await;
             pending.remove(conversation_key)
@@ -336,13 +383,162 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
 
         match entry {
             Some(commit) if Utc::now() - commit.committed_at <= UNDO_WINDOW => {
+                // Nothing is deleted: the entries stay in the journal as
+                // voided ("undone"), they just stop counting.
                 for id in commit.event_ids {
-                    self.store.delete_event(id).await?;
+                    self.store.void_event(id, actor, "undone").await?;
                 }
                 Ok(undone_reply(&self.business.language))
             }
             _ => Ok(nothing_to_undo_reply(&self.business.language)),
         }
+    }
+
+    /// The last `limit` entries, newest first, with who recorded them and
+    /// any void: "#12 Sold: 3 rice at 120.00 KES = 360.00 KES (Mary)".
+    pub async fn history(&self, limit: i64) -> Result<String, OrchestratorError> {
+        let language = self.business.language.as_str();
+        let entries = self.store.journal(self.business.id, limit).await?;
+        if entries.is_empty() {
+            return Ok(texts::history_empty(language).into());
+        }
+        let lines: Vec<String> = entries.iter().map(|e| self.entry_line(e)).collect();
+        Ok(format!(
+            "{}\n{}",
+            texts::history_title(language),
+            lines.join("\n")
+        ))
+    }
+
+    fn entry_line(&self, e: &JournalEntry) -> String {
+        let language = self.business.language.as_str();
+        let mut line = format!("#{} {}", e.number, describe_event(&e.event, language));
+        if let Some(who) = &e.recorded_by {
+            line.push_str(&format!(" ({who})"));
+        }
+        if let Some(v) = &e.voided {
+            line.push_str(&texts::voided_suffix(&v.by, &v.reason, language));
+        }
+        line
+    }
+
+    /// Stop entry `number` from counting. Owners, and managers for entries
+    /// not made by the owner, do it directly; anyone else makes a request
+    /// that the owner or a manager decides. Nothing is ever deleted.
+    pub async fn void_entry(
+        &self,
+        actor: &Actor,
+        number: i64,
+        reason: &str,
+    ) -> Result<Outcome, OrchestratorError> {
+        let language = self.business.language.as_str();
+        let reason = if reason.trim().is_empty() {
+            texts::no_reason(language)
+        } else {
+            reason.trim()
+        };
+        let Some(entry) = self.store.journal_entry(self.business.id, number).await? else {
+            return Ok(Outcome::reply(texts::no_such_entry(number, language)));
+        };
+        if let Some(v) = &entry.voided {
+            return Ok(Outcome::reply(texts::already_voided(
+                number, &v.by, language,
+            )));
+        }
+        let line = self.entry_line(&entry);
+        if actor.role.can(Action::VoidDirectly)
+            && actor.role.outranks_for_voids(entry.recorded_by_role)
+        {
+            self.store
+                .void_event(entry.event.id(), actor, reason)
+                .await?;
+            return Ok(Outcome::reply(texts::voided(&line, language)));
+        }
+        let request = self
+            .store
+            .request_void(self.business.id, number, actor, reason)
+            .await?;
+        Ok(Outcome {
+            reply: texts::void_requested(number, language),
+            notify: vec![Notify::Approvers(texts::void_request_notice(
+                &actor.name,
+                request,
+                &line,
+                reason,
+                language,
+            ))],
+        })
+    }
+
+    /// Void requests waiting for a decision (owner and managers only).
+    pub async fn pending_voids(&self, actor: &Actor) -> Result<String, OrchestratorError> {
+        let language = self.business.language.as_str();
+        if !actor.role.can(Action::DecideVoids) {
+            return Ok(texts::not_allowed(language).into());
+        }
+        let pending = self.store.pending_void_requests(self.business.id).await?;
+        if pending.is_empty() {
+            return Ok(texts::nothing_pending(language).into());
+        }
+        let mut lines = Vec::new();
+        for r in pending {
+            let entry = match self.store.journal_entry(self.business.id, r.entry).await? {
+                Some(e) => self.entry_line(&e),
+                None => format!("#{}", r.entry),
+            };
+            lines.push(texts::pending_line(
+                r.number,
+                &r.requested_by,
+                &r.reason,
+                &entry,
+                language,
+            ));
+        }
+        Ok(lines.join("\n\n"))
+    }
+
+    /// Approve or reject void request `number`.
+    pub async fn decide_void(
+        &self,
+        actor: &Actor,
+        number: i64,
+        approve: bool,
+    ) -> Result<Outcome, OrchestratorError> {
+        let language = self.business.language.as_str();
+        if !actor.role.can(Action::DecideVoids) {
+            return Ok(Outcome::reply(texts::not_allowed(language)));
+        }
+        let pending = self.store.pending_void_requests(self.business.id).await?;
+        let Some(request) = pending.into_iter().find(|r| r.number == number) else {
+            return Ok(Outcome::reply(texts::no_such_request(number, language)));
+        };
+        let entry = self
+            .store
+            .journal_entry(self.business.id, request.entry)
+            .await?;
+        let author_role = entry.as_ref().and_then(|e| e.recorded_by_role);
+        // No approving your own request, and no overruling the owner.
+        let own = request.requested_by_id == actor.id;
+        if (own && actor.role != guss_core::people::Role::Owner)
+            || !actor.role.outranks_for_voids(author_role)
+        {
+            return Ok(Outcome::reply(texts::not_allowed(language)));
+        }
+        self.store
+            .decide_void_request(self.business.id, number, actor, approve)
+            .await?;
+        if approve && let Some(e) = &entry {
+            let reason = format!("{} ({})", request.reason, request.requested_by);
+            self.store.void_event(e.event.id(), actor, &reason).await?;
+        }
+        let reply = texts::decided(number, request.entry, approve, language);
+        Ok(Outcome {
+            notify: vec![Notify::Person(
+                request.requested_by_id.clone(),
+                texts::decision_notice(request.entry, approve, &actor.name, language),
+            )],
+            reply,
+        })
     }
 
     pub async fn handle_report(&self, window: TimeWindow) -> Result<String, OrchestratorError> {
@@ -372,6 +568,27 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         provider_message_id: &str,
         text: &str,
     ) -> Result<Option<String>, OrchestratorError> {
+        let actor = Actor::owner(source_channel_tag(source_channel));
+        self.handle_inbound_as(
+            &actor,
+            conversation_key,
+            source_channel,
+            provider_message_id,
+            text,
+        )
+        .await
+    }
+
+    /// `handle_inbound` for a known person (their role decides what they
+    /// may do, and entries are recorded under their name).
+    pub async fn handle_inbound_as(
+        &self,
+        actor: &Actor,
+        conversation_key: &str,
+        source_channel: SourceChannel,
+        provider_message_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, OrchestratorError> {
         let is_new = self
             .store
             .mark_message_processed(source_channel_tag(source_channel), provider_message_id)
@@ -380,7 +597,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             tracing::debug!(provider_message_id, "skipping redelivered message");
             return Ok(None);
         }
-        self.handle_message(conversation_key, source_channel, text)
+        self.handle_message_as(actor, conversation_key, source_channel, text)
             .await
             .map(Some)
     }
@@ -857,6 +1074,160 @@ mod tests {
         assert_eq!(items[0].name, "soda");
         assert_eq!(items[0].base_unit.as_deref(), Some("bottle"));
         assert_eq!(items[0].units, vec![("crate".to_string(), 24.0)]);
+    }
+
+    fn person(id: &str, role: guss_core::people::Role) -> Actor {
+        Actor::new(format!("telegram:{id}"), id, role)
+    }
+
+    async fn record_as(o: &Orchestrator<FixedProvider, SqliteStore>, who: &Actor) {
+        o.handle_message_as(who, &who.id, SourceChannel::Telegram, "sold 3 rice at 120")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn undo_voids_and_keeps_the_entry() {
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
+        say(&o, "sold 3 rice at 120").await;
+        assert_eq!(say(&o, "no").await, "Undone.");
+        assert!(
+            saved_sales(&o).await.is_empty(),
+            "voided entries don't count"
+        );
+        let journal = o.store.journal(o.business.id, 10).await.unwrap();
+        assert_eq!(journal.len(), 1, "but the entry is kept");
+        assert_eq!(journal[0].voided.as_ref().unwrap().reason, "undone");
+        let history = o.history(10).await.unwrap();
+        assert!(
+            history.contains("[VOIDED by telegram: undone]"),
+            "{history}"
+        );
+    }
+
+    #[tokio::test]
+    async fn staff_void_is_a_request_a_manager_approves() {
+        use guss_core::people::Role;
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
+        let mary = person("mary", Role::Staff);
+        let joe = person("joe", Role::Manager);
+        record_as(&o, &mary).await;
+        let entry = o.store.journal(o.business.id, 1).await.unwrap()[0].number;
+        assert!(o.history(5).await.unwrap().contains("(mary)"));
+
+        let asked = o.void_entry(&mary, entry, "recorded twice").await.unwrap();
+        assert!(
+            asked
+                .reply
+                .starts_with(&format!("Asked for #{entry} to be voided")),
+            "{}",
+            asked.reply
+        );
+        match &asked.notify[..] {
+            [Notify::Approvers(text)] => {
+                assert!(
+                    text.contains("mary asks to void this entry (request 1)"),
+                    "{text}"
+                );
+                assert!(text.contains("Reason: recorded twice"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            saved_sales(&o).await.len(),
+            1,
+            "still counts until approved"
+        );
+
+        // Staff can't approve, not even someone else's request.
+        let nope = o.decide_void(&mary, 1, true).await.unwrap();
+        assert_eq!(
+            nope.reply,
+            "Sorry, only the owner or a manager can do that."
+        );
+
+        assert!(
+            o.pending_voids(&joe)
+                .await
+                .unwrap()
+                .contains("Request 1 from mary")
+        );
+        let done = o.decide_void(&joe, 1, true).await.unwrap();
+        assert_eq!(
+            done.reply,
+            format!("Approved: #{entry} is voided (request 1).")
+        );
+        assert_eq!(
+            done.notify,
+            vec![Notify::Person(
+                "telegram:mary".into(),
+                format!("joe approved: #{entry} is voided.")
+            )]
+        );
+        assert!(saved_sales(&o).await.is_empty());
+        assert_eq!(
+            o.pending_voids(&joe).await.unwrap(),
+            "No void requests are waiting."
+        );
+    }
+
+    #[tokio::test]
+    async fn managers_cannot_overrule_the_owner() {
+        use guss_core::people::Role;
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
+        let boss = person("boss", Role::Owner);
+        let joe = person("joe", Role::Manager);
+        record_as(&o, &boss).await;
+        let entry = o.store.journal(o.business.id, 1).await.unwrap()[0].number;
+
+        // A manager voiding the owner's entry only asks...
+        let asked = o.void_entry(&joe, entry, "wrong price").await.unwrap();
+        assert!(asked.reply.starts_with("Asked for"), "{}", asked.reply);
+        // ...and can't approve it (it's theirs, and it's the owner's entry).
+        let nope = o.decide_void(&joe, 1, true).await.unwrap();
+        assert_eq!(
+            nope.reply,
+            "Sorry, only the owner or a manager can do that."
+        );
+        // The owner can say no; the entry keeps counting.
+        let no = o.decide_void(&boss, 1, false).await.unwrap();
+        assert_eq!(
+            no.reply,
+            format!("Rejected: #{entry} still counts (request 1).")
+        );
+        assert_eq!(saved_sales(&o).await.len(), 1);
+
+        // The owner voids directly.
+        let done = o.void_entry(&boss, entry, "wrong price").await.unwrap();
+        assert!(done.reply.starts_with("Voided: #"), "{}", done.reply);
+        assert!(done.notify.is_empty());
+        let again = o.void_entry(&boss, entry, "x").await.unwrap();
+        assert_eq!(again.reply, format!("#{entry} was already voided by boss."));
+    }
+
+    #[tokio::test]
+    async fn a_manager_voids_staff_entries_directly() {
+        use guss_core::people::Role;
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
+        record_as(&o, &person("mary", Role::Staff)).await;
+        let entry = o.store.journal(o.business.id, 1).await.unwrap()[0].number;
+        let done = o
+            .void_entry(&person("joe", Role::Manager), entry, "")
+            .await
+            .unwrap();
+        assert!(done.reply.starts_with("Voided:"), "{}", done.reply);
+        let journal = o.store.journal(o.business.id, 1).await.unwrap();
+        assert_eq!(
+            journal[0].voided.as_ref().unwrap().reason,
+            "no reason given"
+        );
+        assert_eq!(
+            o.void_entry(&person("joe", Role::Manager), 999, "x")
+                .await
+                .unwrap()
+                .reply,
+            "There's no entry #999. See /history."
+        );
     }
 
     #[test]

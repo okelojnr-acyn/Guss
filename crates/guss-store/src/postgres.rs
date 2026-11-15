@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
-use guss_core::store::{StockLevel, Store, StoreError, TimeWindow};
+use guss_core::people::{Actor, Role};
+use guss_core::store::{
+    JournalEntry, StockLevel, Store, StoreError, TimeWindow, VoidRequest, Voided,
+};
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use uuid::Uuid;
@@ -14,6 +17,51 @@ pub struct PostgresStore {
 
 fn db_err(e: sqlx::Error) -> StoreError {
     StoreError::Database(e.to_string())
+}
+
+fn parse_time(s: &str) -> Result<DateTime<Utc>, StoreError> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| StoreError::Database(format!("bad timestamp {s}: {e}")))
+}
+
+fn journal_from_row(row: sqlx::postgres::PgRow) -> Result<JournalEntry, StoreError> {
+    let payload: String = row.get("payload");
+    let event = serde_json::from_str::<BusinessEvent>(&payload)
+        .map_err(|e| StoreError::Database(format!("corrupt event payload: {e}")))?;
+    let voided = match row.get::<Option<String>, _>("voided_at") {
+        Some(at) => Some(Voided {
+            at: parse_time(&at)?,
+            by: row
+                .get::<Option<String>, _>("voided_by")
+                .unwrap_or_default(),
+            reason: row
+                .get::<Option<String>, _>("void_reason")
+                .unwrap_or_default(),
+        }),
+        None => None,
+    };
+    Ok(JournalEntry {
+        number: row.get("number"),
+        event,
+        recorded_by: row.get("recorded_by_name"),
+        recorded_by_role: row
+            .get::<Option<String>, _>("recorded_by_role")
+            .as_deref()
+            .and_then(Role::parse),
+        voided,
+    })
+}
+
+fn void_request_from_row(row: sqlx::postgres::PgRow) -> Result<VoidRequest, StoreError> {
+    Ok(VoidRequest {
+        number: row.get("number"),
+        entry: row.get("entry"),
+        requested_by_id: row.get("requested_by_id"),
+        requested_by: row.get("requested_by_name"),
+        reason: row.get("reason"),
+        requested_at: parse_time(&row.get::<String, _>("requested_at"))?,
+    })
 }
 
 fn item_from_row(row: sqlx::postgres::PgRow) -> Result<Item, StoreError> {
@@ -45,15 +93,20 @@ impl PostgresStore {
 
 #[async_trait]
 impl Store for PostgresStore {
-    async fn save_event(&self, event: &BusinessEvent) -> Result<(), StoreError> {
+    async fn save_event_by(
+        &self,
+        event: &BusinessEvent,
+        author: Option<&Actor>,
+    ) -> Result<(), StoreError> {
         let c = columns_for(event);
         sqlx::query(
             r#"
             INSERT INTO events (
                 id, business_id, kind, occurred_at, item_name, quantity, delta, unit, unit_factor,
                 amount_minor, currency, category, description, reorder_threshold,
-                recurring_interval, recurring_label, source_channel, raw_text, payload
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                recurring_interval, recurring_label, source_channel, raw_text, payload,
+                recorded_by_id, recorded_by_name, recorded_by_role
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             "#,
         )
         .bind(c.id)
@@ -75,19 +128,116 @@ impl Store for PostgresStore {
         .bind(c.source_channel)
         .bind(c.raw_text)
         .bind(c.payload)
+        .bind(author.map(|a| a.id.clone()))
+        .bind(author.map(|a| a.name.clone()))
+        .bind(author.map(|a| a.role.as_str()))
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
         Ok(())
     }
 
-    async fn delete_event(&self, id: Uuid) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM events WHERE id = $1")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
+    async fn void_event(&self, id: Uuid, by: &Actor, reason: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE events SET voided_at = $1, voided_by = $2, void_reason = $3 WHERE id = $4 AND voided_at IS NULL",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&by.name)
+        .bind(reason)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
         Ok(())
+    }
+
+    async fn journal(
+        &self,
+        business_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<JournalEntry>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT seq AS number, payload, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason FROM events WHERE business_id = $1 ORDER BY seq DESC LIMIT $2",
+        )
+        .bind(business_id.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter().map(journal_from_row).collect()
+    }
+
+    async fn journal_entry(
+        &self,
+        business_id: Uuid,
+        number: i64,
+    ) -> Result<Option<JournalEntry>, StoreError> {
+        let row = sqlx::query(
+            "SELECT seq AS number, payload, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason FROM events WHERE business_id = $1 AND seq = $2",
+        )
+        .bind(business_id.to_string())
+        .bind(number)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        row.map(journal_from_row).transpose()
+    }
+
+    async fn request_void(
+        &self,
+        business_id: Uuid,
+        entry: i64,
+        by: &Actor,
+        reason: &str,
+    ) -> Result<i64, StoreError> {
+        let row = sqlx::query(
+            "INSERT INTO void_requests (business_id, entry, requested_by_id, requested_by_name, reason, requested_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING number",
+        )
+        .bind(business_id.to_string())
+        .bind(entry)
+        .bind(&by.id)
+        .bind(&by.name)
+        .bind(reason)
+        .bind(Utc::now().to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.get::<i64, _>("number"))
+    }
+
+    async fn pending_void_requests(
+        &self,
+        business_id: Uuid,
+    ) -> Result<Vec<VoidRequest>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT number, entry, requested_by_id, requested_by_name, reason, requested_at FROM void_requests WHERE business_id = $1 AND decided_at IS NULL ORDER BY number",
+        )
+        .bind(business_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.into_iter().map(void_request_from_row).collect()
+    }
+
+    async fn decide_void_request(
+        &self,
+        business_id: Uuid,
+        number: i64,
+        by: &Actor,
+        approved: bool,
+    ) -> Result<Option<VoidRequest>, StoreError> {
+        let row = sqlx::query(
+            "UPDATE void_requests SET decided_by = $1, approved = $2, decided_at = $3 WHERE business_id = $4 AND number = $5 AND decided_at IS NULL RETURNING number, entry, requested_by_id, requested_by_name, reason, requested_at",
+        )
+        .bind(&by.name)
+        .bind(approved)
+        .bind(Utc::now().to_rfc3339())
+        .bind(business_id.to_string())
+        .bind(number)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        row.map(void_request_from_row).transpose()
     }
 
     async fn list_events(
@@ -97,7 +247,7 @@ impl Store for PostgresStore {
     ) -> Result<Vec<BusinessEvent>, StoreError> {
         let start = window.start(Utc::now()).to_rfc3339();
         let rows = sqlx::query(
-            "SELECT payload FROM events WHERE business_id = $1 AND occurred_at >= $2 ORDER BY occurred_at ASC",
+            "SELECT payload FROM events WHERE business_id = $1 AND occurred_at >= $2 AND voided_at IS NULL ORDER BY occurred_at ASC",
         )
         .bind(business_id.to_string())
         .bind(start)
@@ -118,9 +268,9 @@ impl Store for PostgresStore {
         let row = sqlx::query(
             r#"
             SELECT
-                COALESCE((SELECT SUM(delta * unit_factor) FROM events WHERE business_id = $1 AND kind = 'stock_update' AND item_name = $2), 0.0)
+                COALESCE((SELECT SUM(delta * unit_factor) FROM events WHERE business_id = $1 AND kind = 'stock_update' AND item_name = $2 AND voided_at IS NULL), 0.0)
                 -
-                COALESCE((SELECT SUM(quantity * unit_factor) FROM events WHERE business_id = $1 AND kind = 'sale' AND item_name = $2), 0.0)
+                COALESCE((SELECT SUM(quantity * unit_factor) FROM events WHERE business_id = $1 AND kind = 'sale' AND item_name = $2 AND voided_at IS NULL), 0.0)
                 AS stock
             "#,
         )
@@ -140,11 +290,11 @@ impl Store for PostgresStore {
             WITH latest_threshold AS (
                 SELECT item_name, reorder_threshold
                 FROM events
-                WHERE business_id = $1 AND kind = 'stock_update' AND reorder_threshold IS NOT NULL
+                WHERE business_id = $1 AND kind = 'stock_update' AND reorder_threshold IS NOT NULL AND voided_at IS NULL
                 AND occurred_at = (
                     SELECT MAX(occurred_at) FROM events e2
                     WHERE e2.business_id = events.business_id AND e2.item_name = events.item_name
-                    AND e2.kind = 'stock_update' AND e2.reorder_threshold IS NOT NULL
+                    AND e2.kind = 'stock_update' AND e2.reorder_threshold IS NOT NULL AND e2.voided_at IS NULL
                 )
             ),
             stock AS (
@@ -152,7 +302,7 @@ impl Store for PostgresStore {
                     COALESCE(SUM(CASE WHEN kind = 'stock_update' THEN delta * unit_factor ELSE 0 END), 0.0)
                     - COALESCE(SUM(CASE WHEN kind = 'sale' THEN quantity * unit_factor ELSE 0 END), 0.0) AS current_quantity
                 FROM events
-                WHERE business_id = $1 AND item_name IS NOT NULL
+                WHERE business_id = $1 AND item_name IS NOT NULL AND voided_at IS NULL
                 GROUP BY item_name
             )
             SELECT stock.item_name AS item_name, stock.current_quantity AS current_quantity, latest_threshold.reorder_threshold AS reorder_threshold
@@ -487,20 +637,111 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn delete_event_removes_it_from_current_stock() {
+    async fn void_stops_it_counting_but_keeps_it_in_the_journal() {
         let store = test_store().await;
         let business_id = Uuid::new_v4();
         let event = restock(business_id, "rice", 10.0, None);
         let event_id = event.id();
+        let mary = Actor::new("telegram:1", "Mary", Role::Staff);
+        let boss = Actor::new("telegram:2", "Boss", Role::Owner);
 
-        store.save_event(&event).await.unwrap();
+        store.save_event_by(&event, Some(&mary)).await.unwrap();
         assert_eq!(
             store.current_stock(business_id, "rice").await.unwrap(),
             10.0
         );
 
-        store.delete_event(event_id).await.unwrap();
+        store
+            .void_event(event_id, &boss, "counted twice")
+            .await
+            .unwrap();
         assert_eq!(store.current_stock(business_id, "rice").await.unwrap(), 0.0);
+        assert!(
+            store
+                .list_events(business_id, TimeWindow::Day)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let journal = store.journal(business_id, 10).await.unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].event, event);
+        assert_eq!(journal[0].recorded_by.as_deref(), Some("Mary"));
+        assert_eq!(journal[0].recorded_by_role, Some(Role::Staff));
+        let voided = journal[0].voided.as_ref().unwrap();
+        assert_eq!(
+            (voided.by.as_str(), voided.reason.as_str()),
+            ("Boss", "counted twice")
+        );
+        let same = store
+            .journal_entry(business_id, journal[0].number)
+            .await
+            .unwrap();
+        assert_eq!(same, Some(journal[0].clone()));
+
+        // Voiding again changes nothing.
+        store.void_event(event_id, &mary, "again").await.unwrap();
+        let journal = store.journal(business_id, 10).await.unwrap();
+        assert_eq!(journal[0].voided.as_ref().unwrap().by, "Boss");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn void_requests_wait_until_decided_once() {
+        let store = test_store().await;
+        let business_id = Uuid::new_v4();
+        let mary = Actor::new("telegram:1", "Mary", Role::Staff);
+        let boss = Actor::new("telegram:2", "Boss", Role::Owner);
+        let first = store
+            .request_void(business_id, 7, &mary, "typo")
+            .await
+            .unwrap();
+        let second = store
+            .request_void(business_id, 8, &mary, "twice")
+            .await
+            .unwrap();
+        assert!(second > first);
+        let pending = store.pending_void_requests(business_id).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            (
+                pending[0].entry,
+                pending[0].requested_by.as_str(),
+                pending[0].reason.as_str()
+            ),
+            (7, "Mary", "typo")
+        );
+        assert_eq!(pending[0].requested_by_id, "telegram:1");
+
+        let decided = store
+            .decide_void_request(business_id, first, &boss, true)
+            .await
+            .unwrap();
+        assert_eq!(decided.map(|r| r.entry), Some(7));
+        // Decided requests can't be decided again.
+        assert_eq!(
+            store
+                .decide_void_request(business_id, first, &boss, false)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .pending_void_requests(business_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .pending_void_requests(Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

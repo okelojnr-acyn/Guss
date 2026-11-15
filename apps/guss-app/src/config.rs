@@ -151,6 +151,10 @@ pub struct ChannelConfig {
     /// (staff). With this or the owner set, everyone else is refused.
     #[serde(default, deserialize_with = "ids_as_text")]
     pub telegram_allowed_user_ids: Option<String>,
+    /// Managers' Telegram ids: approve void requests, see week/month
+    /// reports. Allowed to use the bot like staff.
+    #[serde(default, deserialize_with = "ids_as_text")]
+    pub telegram_manager_ids: Option<String>,
     pub whatsapp_owner_phone_number: Option<String>,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
@@ -183,6 +187,7 @@ impl Default for ChannelConfig {
             whatsapp_listen_addr: default_whatsapp_listen_addr(),
             telegram_owner_chat_id: None,
             telegram_allowed_user_ids: None,
+            telegram_manager_ids: None,
             whatsapp_owner_phone_number: None,
             scheduler: SchedulerConfig::default(),
         }

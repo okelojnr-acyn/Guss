@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use guss_core::domain::{BusinessEvent, BusinessProfile, Document, Item};
-use guss_core::store::{StockLevel, Store, StoreError, TimeWindow};
+use guss_core::people::Actor;
+use guss_core::store::{JournalEntry, StockLevel, Store, StoreError, TimeWindow, VoidRequest};
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -50,19 +51,92 @@ impl AnyStore {
 
 #[async_trait]
 impl Store for AnyStore {
-    async fn save_event(&self, event: &BusinessEvent) -> Result<(), StoreError> {
+    async fn save_event_by(
+        &self,
+        event: &BusinessEvent,
+        author: Option<&Actor>,
+    ) -> Result<(), StoreError> {
         match self {
-            AnyStore::Sqlite(s) => s.save_event(event).await,
+            AnyStore::Sqlite(s) => s.save_event_by(event, author).await,
             #[cfg(feature = "postgres")]
-            AnyStore::Postgres(s) => s.save_event(event).await,
+            AnyStore::Postgres(s) => s.save_event_by(event, author).await,
         }
     }
 
-    async fn delete_event(&self, id: Uuid) -> Result<(), StoreError> {
+    async fn void_event(&self, id: Uuid, by: &Actor, reason: &str) -> Result<(), StoreError> {
         match self {
-            AnyStore::Sqlite(s) => s.delete_event(id).await,
+            AnyStore::Sqlite(s) => s.void_event(id, by, reason).await,
             #[cfg(feature = "postgres")]
-            AnyStore::Postgres(s) => s.delete_event(id).await,
+            AnyStore::Postgres(s) => s.void_event(id, by, reason).await,
+        }
+    }
+
+    async fn journal(
+        &self,
+        business_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<JournalEntry>, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.journal(business_id, limit).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.journal(business_id, limit).await,
+        }
+    }
+
+    async fn journal_entry(
+        &self,
+        business_id: Uuid,
+        number: i64,
+    ) -> Result<Option<JournalEntry>, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.journal_entry(business_id, number).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.journal_entry(business_id, number).await,
+        }
+    }
+
+    async fn request_void(
+        &self,
+        business_id: Uuid,
+        entry: i64,
+        by: &Actor,
+        reason: &str,
+    ) -> Result<i64, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.request_void(business_id, entry, by, reason).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.request_void(business_id, entry, by, reason).await,
+        }
+    }
+
+    async fn pending_void_requests(
+        &self,
+        business_id: Uuid,
+    ) -> Result<Vec<VoidRequest>, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.pending_void_requests(business_id).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.pending_void_requests(business_id).await,
+        }
+    }
+
+    async fn decide_void_request(
+        &self,
+        business_id: Uuid,
+        number: i64,
+        by: &Actor,
+        approved: bool,
+    ) -> Result<Option<VoidRequest>, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => {
+                s.decide_void_request(business_id, number, by, approved)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => {
+                s.decide_void_request(business_id, number, by, approved)
+                    .await
+            }
         }
     }
 

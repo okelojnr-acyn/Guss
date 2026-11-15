@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use guss_core::domain::SourceChannel;
-use guss_core::store::Store;
+use guss_core::people::{Action, Actor};
+use guss_core::store::{Store, TimeWindow};
 use guss_llm::LlmProvider;
 use guss_scheduler::ReportSink;
 use guss_voice::AudioFormat;
@@ -14,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::orchestrator::Orchestrator;
+use crate::orchestrator::{Notify, Orchestrator, Outcome};
 use crate::telegram_ux::{self, Command, TelegramAccess};
 use crate::voice_support::VoiceSupport;
 
@@ -197,7 +198,7 @@ where
         send_text(bot, chat_id, &telegram_ux::your_id(&language, user_id)).await?;
         return Ok(());
     }
-    if !access.allows(user_id) {
+    let Some(role) = access.role_of(user_id) else {
         tracing::info!(user_id, "refused a message from a user who isn't allowed");
         send_text(
             bot,
@@ -206,7 +207,14 @@ where
         )
         .await?;
         return Ok(());
-    }
+    };
+    let name = match &user.last_name {
+        Some(last) => format!("{} {last}", user.first_name),
+        None => user.first_name.clone(),
+    };
+    let actor = Actor::new(format!("telegram:{user_id}"), name, role);
+    let api = |e: crate::OrchestratorError| TelegramError::Api(e.to_string());
+
     match command {
         Some(Command::Start) => {
             let reply = telegram_ux::welcome(&language, &business_name, &user.first_name);
@@ -219,13 +227,48 @@ where
         }
         Some(Command::Report(arg)) => {
             let reply = match telegram_ux::report_window(arg.as_deref()) {
-                Some(window) => orchestrator
-                    .handle_report(window)
-                    .await
-                    .map_err(|e| TelegramError::Api(e.to_string()))?,
+                Some(window) if window != TimeWindow::Day && !role.can(Action::ReportLonger) => {
+                    crate::journal_texts::longer_reports_not_allowed(&language).to_string()
+                }
+                Some(window) => orchestrator.handle_report(window).await.map_err(api)?,
                 None => telegram_ux::bad_report_window(&language),
             };
             send_text(bot, chat_id, &reply).await?;
+            return Ok(());
+        }
+        Some(Command::History) => {
+            let reply = orchestrator.history(15).await.map_err(api)?;
+            send_text(bot, chat_id, &reply).await?;
+            return Ok(());
+        }
+        Some(Command::Pending) => {
+            let reply = orchestrator.pending_voids(&actor).await.map_err(api)?;
+            send_text(bot, chat_id, &reply).await?;
+            return Ok(());
+        }
+        Some(Command::Void(arg)) => {
+            let Some((number, reason)) = telegram_ux::number_and_rest(arg.as_deref()) else {
+                send_text(bot, chat_id, &telegram_ux::void_usage(&language)).await?;
+                return Ok(());
+            };
+            let outcome = orchestrator
+                .void_entry(&actor, number, &reason)
+                .await
+                .map_err(api)?;
+            deliver(bot, access, chat_id, outcome).await?;
+            return Ok(());
+        }
+        Some(Command::Approve(ref arg)) | Some(Command::Reject(ref arg)) => {
+            let approve = matches!(command, Some(Command::Approve(_)));
+            let Some((number, _)) = telegram_ux::number_and_rest(arg.as_deref()) else {
+                send_text(bot, chat_id, &telegram_ux::decide_usage(&language)).await?;
+                return Ok(());
+            };
+            let outcome = orchestrator
+                .decide_void(&actor, number, approve)
+                .await
+                .map_err(api)?;
+            deliver(bot, access, chat_id, outcome).await?;
             return Ok(());
         }
         Some(Command::Unknown) => {
@@ -264,7 +307,8 @@ where
     };
 
     let reply = orchestrator
-        .handle_inbound(
+        .handle_inbound_as(
+            &actor,
             &conversation_key,
             SourceChannel::Telegram,
             &provider_message_id,
@@ -337,6 +381,36 @@ async fn transcribe_voice_note(
     stt.transcribe(&wav)
         .await
         .map_err(|e| TelegramError::Api(e.to_string()))
+}
+
+/// Sends the reply, then the notices for other people: void requests to
+/// the owner and managers (not back to the person asking), decisions to
+/// the person who asked. A notice that can't be delivered is logged, never
+/// fatal: the request is stored and visible in /pending either way.
+async fn deliver(
+    bot: &Bot,
+    access: &TelegramAccess,
+    chat_id: ChatId,
+    outcome: Outcome,
+) -> Result<(), TelegramError> {
+    send_text(bot, chat_id, &outcome.reply).await?;
+    for notice in outcome.notify {
+        let (targets, text) = match notice {
+            Notify::Approvers(text) => (access.approver_chats(), text),
+            Notify::Person(id, text) => {
+                match id.strip_prefix("telegram:").and_then(|n| n.parse().ok()) {
+                    Some(n) => (vec![n], text),
+                    None => continue,
+                }
+            }
+        };
+        for target in targets.into_iter().filter(|t| *t != chat_id.0) {
+            if let Err(e) = send_text(bot, ChatId(target), &text).await {
+                tracing::warn!(target, error = %e, "couldn't deliver a notice");
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn send_text(bot: &Bot, chat_id: ChatId, text: &str) -> Result<(), TelegramError> {
@@ -445,6 +519,7 @@ mod tests {
         let bot = Bot::new("TEST_TOKEN").set_api_url(server.uri().parse().unwrap());
         let orchestrator = test_orchestrator().await;
         let access = TelegramAccess {
+            manager_user_ids: vec![],
             owner_chat_id: Some(10),
             allowed_user_ids: vec![],
         };
@@ -483,6 +558,7 @@ mod tests {
         let bot = Bot::new("TEST_TOKEN").set_api_url(server.uri().parse().unwrap());
         let orchestrator = test_orchestrator().await;
         let access = TelegramAccess {
+            manager_user_ids: vec![],
             owner_chat_id: Some(42),
             allowed_user_ids: vec![],
         };
