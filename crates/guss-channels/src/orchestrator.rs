@@ -1867,31 +1867,34 @@ mod tests {
             typo,
         ]));
         let o = Orchestrator::new(Nlu::new(script, "en"), store.clone(), business.clone());
+        let ask = |text: &'static str| o.handle_message("chat", SourceChannel::Telegram, text);
+        let sales = || async {
+            store
+                .list_events(business.id, TimeWindow::Day)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| matches!(e, BusinessEvent::Sale(_)))
+                .count()
+        };
         for _ in 0..3 {
-            say(&o, "sold rice 120").await;
+            ask("sold rice 120").await.unwrap();
         }
-        let reply = say(&o, "sold rice 12000").await;
+        let reply = ask("sold rice 12000").await.unwrap();
         assert!(
             reply.starts_with("rice usually sells at 120.00 KES"),
             "{reply}"
         );
-        assert_eq!(saved_sales(&o).await.len(), 3);
+        assert_eq!(sales().await, 3);
         // Anything but yes drops it and handles the new message.
-        let reply = say(&o, "sold rice 12000 again").await;
+        let reply = ask("sold rice 12000 again").await.unwrap();
         assert!(
             reply.starts_with("(The unusual price was not saved.)"),
             "{reply}"
         );
-        assert_eq!(
-            say(&o, "yes")
-                .await
-                .lines()
-                .next()
-                .unwrap()
-                .starts_with("Sold:"),
-            true
-        );
-        assert_eq!(saved_sales(&o).await.len(), 4);
+        let reply = ask("yes").await.unwrap();
+        assert!(reply.starts_with("Sold:"), "{reply}");
+        assert_eq!(sales().await, 4);
     }
 
     #[test]
