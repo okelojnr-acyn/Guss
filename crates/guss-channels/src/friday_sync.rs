@@ -455,13 +455,16 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/inventory/products"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!([{"id": "p-sugar", "name": "Sugar"}])),
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{"id": "p-sugar", "name": "Sugar"}])),
             )
             .mount(&server)
             .await;
         Mock::given(method("POST"))
             .and(path("/api/inventory/products/p-sugar/adjust-stock"))
-            .and(body_partial_json(json!({"delta": 2.5, "reason": "received"})))
+            .and(body_partial_json(
+                json!({"delta": 2.5, "reason": "received"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "p-sugar"})))
             .expect(1)
             .mount(&server)
