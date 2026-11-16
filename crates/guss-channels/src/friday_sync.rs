@@ -198,12 +198,15 @@ async fn push(
 
     if let (true, Some((name, change, reason))) = (to_inventory, stock) {
         let delta = if item.reverse { -change } else { change };
-        if (delta - delta.round()).abs() > 1e-9 {
-            return Err(permanent(format!(
-                "Friday Inventory counts whole units; {} {name} wasn't sent",
-                delta.abs()
-            )));
-        }
+        // Friday keeps stock to three decimals (grams, millilitres) since
+        // units of measure (Friday #38): 2.5 kg goes as 2.5. A whole
+        // number still goes as an integer.
+        let delta = (delta * 1000.0).round() / 1000.0;
+        let delta_json = if delta.fract() == 0.0 {
+            json!(delta as i64)
+        } else {
+            json!(delta)
+        };
         // Already there (an earlier attempt got through but its answer
         // didn't): skip.
         let existing = friday
@@ -219,7 +222,7 @@ async fn push(
                     &token,
                     &format!("/api/inventory/products/{product_id}/adjust-stock"),
                     &json!({
-                        "delta": delta.round() as i64,
+                        "delta": delta_json,
                         // A reversal is a correction, whatever the original was.
                         "reason": if item.reverse { "manual_adjustment" } else { reason },
                         "reference": reference,
@@ -430,6 +433,49 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    #[tokio::test]
+    async fn a_fraction_of_a_kilo_reaches_inventory_as_a_fraction() {
+        let server = friday("write").await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let mut sugar = restock(business_id, "Sugar", 2.5);
+        if let BusinessEvent::StockUpdate(su) = &mut sugar {
+            su.unit = Some("kg".into());
+            su.unit_factor = 1.0;
+        }
+        store.save_event_by(&sugar, Some(&mary)).await.unwrap();
+        Mock::given(method("GET"))
+            .and(path("/api/inventory/stock_moves"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/inventory/products"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{"id": "p-sugar", "name": "Sugar"}])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/inventory/products/p-sugar/adjust-stock"))
+            .and(body_partial_json(
+                json!({"delta": 2.5, "reason": "received"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "p-sugar"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
