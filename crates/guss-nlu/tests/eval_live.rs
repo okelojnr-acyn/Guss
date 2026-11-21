@@ -337,6 +337,7 @@ mod scoring {
             text: "x".into(),
             occurred_at: Utc::now(),
             source_channel: SourceChannel::Cli,
+            paystack_ref: None,
         })
     }
 

@@ -88,6 +88,8 @@ pub enum Command {
     Reject(Option<String>),
     /// Link this Telegram account to the person's Friday account.
     Link,
+    /// "/paylink John": a Paystack link for everything John owes.
+    PayLink(Option<String>),
     Unknown,
 }
 
@@ -112,6 +114,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "approve" | "setujui" => Command::Approve(arg),
         "reject" | "tolak" => Command::Reject(arg),
         "link" | "tautkan" => Command::Link,
+        "paylink" | "tautanbayar" | "kiungo" => Command::PayLink(arg),
         _ => Command::Unknown,
     })
 }
@@ -244,6 +247,47 @@ pub fn welcome(language: &str, business: &str, first_name: &str) -> String {
     }
 }
 
+pub fn paylink_usage(language: &str) -> String {
+    if is_id(language) {
+        "Tulis nama pelanggan: /paylink Budi".into()
+    } else if is_sw(language) {
+        "Andika jina la mteja: /paylink Juma".into()
+    } else {
+        "Say whose: /paylink John".into()
+    }
+}
+
+/// The reply to "/paylink John": the link to forward.
+pub fn paylink_sent(language: &str, customer: &str, owed: &str, url: &str) -> String {
+    if is_id(language) {
+        format!(
+            "Tautan bayar untuk {customer} ({owed}):\n{url}\n\nTeruskan ke dia. Kartu, M-Pesa atau \
+             bank lewat Paystack. Begitu dia bayar, saya catat."
+        )
+    } else if is_sw(language) {
+        format!(
+            "Kiungo cha malipo cha {customer} ({owed}):\n{url}\n\nMtumie. Kadi, M-Pesa au benki \
+             kupitia Paystack. Akilipa, nitarekodi."
+        )
+    } else {
+        format!(
+            "Pay link for {customer} ({owed}):\n{url}\n\nForward it to them. Card, M-Pesa or bank \
+             through Paystack. When they pay, I'll record it."
+        )
+    }
+}
+
+/// "/paylink" when Friday couldn't make one; `why` is Friday's reason.
+pub fn paylink_failed(language: &str, why: &str) -> String {
+    if is_id(language) {
+        format!("Tidak bisa membuat tautan bayar: {why}")
+    } else if is_sw(language) {
+        format!("Sikuweza kutengeneza kiungo cha malipo: {why}")
+    } else {
+        format!("Couldn't make a pay link: {why}")
+    }
+}
+
 pub fn help(language: &str) -> String {
     if is_id(language) {
         "Cukup ceritakan apa yang terjadi, seperti mengirim pesan ke rekan kerja:\n\
@@ -253,7 +297,9 @@ pub fn help(language: &str) -> String {
          Saya akan mengonfirmasi yang saya catat. Salah? Balas \"batal\" atau /undo dalam 5 menit.\n\n\
          /report menampilkan penjualan hari ini (/report minggu, /report bulan).\n\n\
          /history menampilkan catatan terakhir dengan nomornya. Catatan yang salah setelah 5 menit: \
-         /void 12 alasannya. Tidak ada yang dihapus; pemilik atau manajer menyetujui."
+         /void 12 alasannya. Tidak ada yang dihapus; pemilik atau manajer menyetujui.\n\n\
+         /paylink Budi memberi tautan Paystack untuk utang Budi, untuk diteruskan. \
+         Begitu dia bayar, saya catat."
             .to_string()
     } else if is_sw(language) {
         "Niambie tu kilichotokea, kama unavyomtumia mwenzako ujumbe:\n\
@@ -263,7 +309,9 @@ pub fn help(language: &str) -> String {
          Nitathibitisha nilichorekodi. Kosa? Jibu \"hapana\" au /undo ndani ya dakika 5.\n\n\
          /report inaonyesha mauzo ya leo (/report wiki, /report mwezi).\n\n\
          /history inaonyesha rekodi za mwisho na nambari zake. Rekodi yenye kosa baada ya dakika 5: \
-         /void 12 sababu. Hakuna kinachofutwa kabisa; mwenye duka au meneja anaidhinisha."
+         /void 12 sababu. Hakuna kinachofutwa kabisa; mwenye duka au meneja anaidhinisha.\n\n\
+         /paylink Juma inakupa kiungo cha Paystack cha deni la Juma, umtumie. \
+         Akilipa, nitarekodi."
             .to_string()
     } else {
         "Just tell me what happened, the way you'd text a colleague:\n\
@@ -273,7 +321,9 @@ pub fn help(language: &str) -> String {
          I'll confirm what I recorded. A mistake? Reply \"no\" or /undo within 5 minutes.\n\n\
          /report shows today's sales (/report week, /report month).\n\n\
          /history lists the latest entries with their numbers. A wrong entry after 5 minutes: \
-         /void 12 the reason. Nothing is deleted; the owner or a manager approves."
+         /void 12 the reason. Nothing is deleted; the owner or a manager approves.\n\n\
+         /paylink John gives a Paystack link for what John owes, to forward to him. \
+         When he pays, I record it."
             .to_string()
     }
 }
@@ -380,6 +430,7 @@ fn commands(language: &str) -> Vec<BotCommand> {
         "history" => "Rekodi za mwisho na nambari zake",
         "void" => "Futa rekodi: /void 12 sababu",
         "pending" => "Maombi ya kufuta ya kuidhinisha",
+        "paylink" => "Kiungo cha malipo: /paylink Juma",
         "help" => "Jinsi ya kunitumia",
         _ => "Onyesha kitambulisho chako cha Telegram",
     };
@@ -418,6 +469,11 @@ fn commands(language: &str) -> Vec<BotCommand> {
             "pending",
             "Void requests to approve",
             "Permintaan pembatalan untuk disetujui",
+        ),
+        c(
+            "paylink",
+            "A pay link for what a customer owes: /paylink John",
+            "Tautan bayar untuk utang pelanggan: /paylink Budi",
         ),
         c("help", "How to use me", "Cara memakai saya"),
         c(
