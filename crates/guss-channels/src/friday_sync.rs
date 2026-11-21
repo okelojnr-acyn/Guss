@@ -1,13 +1,17 @@
 //! Sends Guss's entries to Friday, as *the person who recorded each one*
-//! (their linked Friday account), to every app the org lets Guss write:
+//! (their linked Friday account):
 //!
-//! - Inventory: a sale lowers stock, a restock raises it, a write-off
-//!   lowers it.
-//! - Accounting: a cash sale (Dr Cash, Cr Sales Revenue), an expense (Dr
-//!   Shop expenses, Cr Cash) and a paid restock (Dr Inventory, Cr Cash), as
-//!   draft journal entries the accountant posts.
+//! - A sale is recorded in Friday's sales system (Invoicing), like a till
+//!   sale but on the "guss" channel (owner, 2026-11-21: one place for
+//!   everything). Friday then lowers stock, books it with its VAT and the
+//!   money in Accounting, and lists it for eTIMS and the VAT return. A
+//!   voided sale is returned there in full.
+//! - Inventory: a restock raises stock, a write-off lowers it.
+//! - Accounting: an expense (Dr Shop expenses, Cr Cash) and a paid restock
+//!   (Dr Inventory, Cr Cash), as draft journal entries the accountant
+//!   posts.
 //!
-//! A voided entry is reversed in both. Everything is tagged
+//! A voided restock or expense is reversed in both. Everything is tagged
 //! "guss:<entry id>" and checked first, so a retry never counts twice.
 //! Nothing is lost if Friday is down: entries wait in the journal and go
 //! on the next round.
@@ -15,7 +19,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use guss_core::domain::{BusinessEvent, BusinessProfile};
+use guss_core::domain::{BusinessEvent, BusinessProfile, Sale};
 use guss_core::store::{Store, StoreError, SyncItem};
 use serde_json::{Value, json};
 
@@ -29,7 +33,6 @@ const BATCH: i64 = 50;
 /// expense account Guss adds the first time it needs it).
 const CASH: &str = "1010";
 const INVENTORY_ASSET: &str = "1400";
-const SALES_REVENUE: &str = "4000";
 const SHOP_EXPENSES: (&str, &str) = ("6900", "Shop expenses");
 
 /// Why an entry didn't reach Friday. `permanent` ones are shown in
@@ -98,7 +101,6 @@ pub async fn run<S: Store + ?Sized>(store: &S, friday: &FridayClient, business: 
 /// What a journal entry means for Inventory: (item, base-unit change, reason).
 fn stock_change(event: &BusinessEvent) -> Option<(&str, f64, &'static str)> {
     match event {
-        BusinessEvent::Sale(s) => Some((&s.item_name, -s.base_quantity(), "sale")),
         BusinessEvent::StockUpdate(su) => {
             let reason = if su.delta >= 0.0 {
                 "received"
@@ -117,16 +119,6 @@ fn stock_change(event: &BusinessEvent) -> Option<(&str, f64, &'static str)> {
 fn booking(event: &BusinessEvent) -> Option<(&'static str, &'static str, i64, String, String)> {
     let cents = |major: f64| (major * 100.0).round() as i64;
     match event {
-        BusinessEvent::Sale(s) => {
-            let total = s.total();
-            Some((
-                CASH,
-                SALES_REVENUE,
-                cents(total.major_units()),
-                total.currency,
-                format!("Guss: sold {} {}", s.quantity, s.item_name),
-            ))
-        }
         BusinessEvent::Expense(x) => Some((
             SHOP_EXPENSES.0,
             CASH,
@@ -162,15 +154,24 @@ async fn push(
     item: &SyncItem,
 ) -> Result<(), Failure> {
     let entry = &item.entry;
+    let sale = match &entry.event {
+        BusinessEvent::Sale(s) => Some(s),
+        _ => None,
+    };
     let stock = stock_change(&entry.event);
     let book = booking(&entry.event);
-    if stock.is_none() && book.is_none() {
+    if sale.is_none() && stock.is_none() && book.is_none() {
         return Ok(());
     }
     let people = friday.people().await?;
     let to_inventory = stock.is_some() && people.can_write("inventory");
     let to_accounting = book.is_some() && people.can_write("accounting");
-    if !to_inventory && !to_accounting {
+    if sale.is_some() && !people.can_write("invoicing") {
+        return Err(permanent(
+            "Guss may not record sales in Friday (Friday: Integrations, Guss: Invoicing)",
+        ));
+    }
+    if sale.is_none() && !to_inventory && !to_accounting {
         return Err(permanent(
             "Guss may not change Inventory or Accounting (Friday: Integrations, Guss)",
         ));
@@ -189,6 +190,9 @@ async fn push(
             "{who} isn't linked to Friday (send /link)"
         )));
     };
+    if let Some(s) = sale {
+        return push_sale(friday, business, &token, item.reverse, s).await;
+    }
     let id = entry.event.id();
     let reference = if item.reverse {
         format!("guss-void:{id}")
@@ -216,7 +220,7 @@ async fn push(
             )
             .await?;
         if !existing.as_array().is_some_and(|a| !a.is_empty()) {
-            let product_id = find_or_create_product(friday, &token, name).await?;
+            let (product_id, _) = find_or_create_product(friday, &token, name).await?;
             friday
                 .post(
                     &token,
@@ -281,6 +285,91 @@ async fn push(
     Ok(())
 }
 
+/// A sale goes to Friday's sales system on the "guss" channel; its void
+/// is a full return there. Friday records a sale once per
+/// client_sale_id, so a retry never sells twice.
+async fn push_sale(
+    friday: &FridayClient,
+    business: &BusinessProfile,
+    token: &str,
+    reverse: bool,
+    s: &Sale,
+) -> Result<(), Failure> {
+    let total = s.total();
+    if !total
+        .currency
+        .eq_ignore_ascii_case(business.default_currency.trim())
+    {
+        return Err(permanent(format!(
+            "in {}; Friday records sales in {} only",
+            total.currency, business.default_currency
+        )));
+    }
+    let reference = format!("guss:{}", s.id);
+    if reverse {
+        // Find the sale Friday recorded and return it in full. Never
+        // recorded, or already returned: nothing left to undo.
+        let found = match friday
+            .get(token, &format!("/api/invoicing/pos/sales/{reference}"))
+            .await
+        {
+            Ok(v) => v,
+            Err(FridayError::Status { status: 404, .. }) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        if found.get("status").and_then(Value::as_str) == Some("void") {
+            return Ok(());
+        }
+        let number = found
+            .get("number")
+            .and_then(Value::as_str)
+            .ok_or_else(|| permanent("Friday sent a sale without a number"))?;
+        return match friday
+            .post(
+                token,
+                &format!("/api/invoicing/pos/sales/{number}/return"),
+                &json!({}),
+            )
+            .await
+        {
+            Ok(_) | Err(FridayError::Status { status: 400, .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+    }
+    let (product_id, tax_code) = find_or_create_product(friday, token, &s.item_name).await?;
+    let mut line = json!({
+        "description": s.item_name,
+        "quantity": (s.quantity * 1000.0).round() / 1000.0,
+        "unit_price_cents": s.unit_price.amount.minor_units,
+        "product_id": product_id,
+    });
+    if !tax_code.is_empty() {
+        line["tax_code"] = json!(tax_code);
+    }
+    if let Some(unit) = &s.unit {
+        // "2 crates": Friday lowers stock by 2 x 24 bottles.
+        line["uom"] = json!(unit);
+        line["uom_factor"] = json!(s.unit_factor);
+    }
+    friday
+        .post(
+            token,
+            "/api/invoicing/pos/sales",
+            &json!({
+                "client_sale_id": reference,
+                "channel": "guss",
+                "currency": total.currency,
+                // Guss doesn't ask how the customer paid yet.
+                "method": "cash",
+                "amount_cents": total.amount.minor_units,
+                "created_at_ms": s.occurred_at.timestamp_millis(),
+                "lines": [line],
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
 /// The org's accounts, adding "6900 Shop expenses" the first time.
 async fn accounts(friday: &FridayClient, token: &str) -> Result<Vec<Value>, Failure> {
     let list = friday.get(token, "/api/accounting/accounts").await?;
@@ -312,12 +401,13 @@ fn account_id(accounts: &[Value], code: &str) -> Result<String, Failure> {
 }
 
 /// The Inventory product with this name (any spelling Guss treats as the
-/// same item), created if Friday doesn't have it yet.
+/// same item), created if Friday doesn't have it yet: its id and its tax
+/// type ("" for the business default).
 async fn find_or_create_product(
     friday: &FridayClient,
     token: &str,
     name: &str,
-) -> Result<String, Failure> {
+) -> Result<(String, String), Failure> {
     let wanted = normalize_name(name);
     let products = friday.get(token, "/api/inventory/products").await?;
     if let Some(found) = products.as_array().into_iter().flatten().find(|p| {
@@ -325,10 +415,15 @@ async fn find_or_create_product(
             .and_then(Value::as_str)
             .is_some_and(|n| normalize_name(n) == wanted)
     }) {
+        let tax_code = found
+            .get("tax_code")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         return found
             .get("id")
             .and_then(Value::as_str)
-            .map(str::to_string)
+            .map(|id| (id.to_string(), tax_code))
             .ok_or_else(|| permanent("Friday sent a product without an id"));
     }
     let created = friday
@@ -341,7 +436,7 @@ async fn find_or_create_product(
     created
         .get("id")
         .and_then(Value::as_str)
-        .map(str::to_string)
+        .map(|id| (id.to_string(), String::new()))
         .ok_or_else(|| permanent("Friday created a product without an id"))
 }
 
@@ -567,12 +662,12 @@ mod tests {
         let journal = store.journal(business_id, 5).await.unwrap();
         assert_eq!(
             journal[0].sync_error.as_deref(),
-            Some("Guss may not change Inventory or Accounting (Friday: Integrations, Guss)")
+            Some("Guss may not record sales in Friday (Friday: Integrations, Guss: Invoicing)")
         );
         assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
 
         // Write access, but the author isn't linked.
-        let server = friday("write").await;
+        let server = friday_with(json!({"invoicing": "write"})).await;
         let client = FridayClient::new(server.uri(), KEY);
         let stranger = Actor::new("telegram:99", "Sam", Role::Staff);
         store
@@ -682,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn other_currencies_are_not_booked() {
-        let server = friday_with(json!({"accounting": "write"})).await;
+        let server = friday_with(json!({"invoicing": "write"})).await;
         let business_id = Uuid::new_v4();
         let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
         let mary = Actor::new("telegram:7", "Mary", Role::Staff);
@@ -698,7 +793,86 @@ mod tests {
         let journal = store.journal(business_id, 1).await.unwrap();
         assert_eq!(
             journal[0].sync_error.as_deref(),
-            Some("in USD; Accounting books KES only")
+            Some("in USD; Friday records sales in KES only")
         );
+    }
+
+    #[tokio::test]
+    async fn a_sale_goes_to_fridays_sales_system_once_and_its_void_returns_it() {
+        // Invoicing write only: the sale never touches stock or the books
+        // directly; Friday does both from the one sale.
+        let server = friday_with(json!({"invoicing": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let mut crates = sale(business_id, "Sodas", 2.0);
+        if let BusinessEvent::Sale(s) = &mut crates {
+            s.unit = Some("crate".into());
+            s.unit_factor = 24.0;
+            s.unit_price = CurrencyAmount::new(1200.0, "KES");
+        }
+        store.save_event_by(&crates, Some(&mary)).await.unwrap();
+        let reference = format!("guss:{}", crates.id());
+
+        Mock::given(method("GET"))
+            .and(path("/api/inventory/products"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{"id": "p-soda", "name": "Soda", "tax_code": "B"}])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/invoicing/pos/sales"))
+            .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+            .and(body_partial_json(json!({
+                "client_sale_id": reference,
+                "channel": "guss",
+                "currency": "KES",
+                "amount_cents": 240000,
+                "lines": [{
+                    "description": "Sodas", "quantity": 2.0, "unit_price_cents": 120000,
+                    "product_id": "p-soda", "tax_code": "B", "uom": "crate", "uom_factor": 24.0
+                }]
+            })))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({"number": "POS-1", "status": "paid"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Voided: Friday finds the sale by Guss's reference and returns it.
+        let boss = Actor::new("telegram:1", "Boss", Role::Owner);
+        store.void_event(crates.id(), &boss, "wrong").await.unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!("/api/invoicing/pos/sales/{reference}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"number": "POS-1", "status": "paid"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/invoicing/pos/sales/POS-1/return"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number": "RET-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
     }
 }
