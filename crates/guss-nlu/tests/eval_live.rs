@@ -290,6 +290,7 @@ mod scoring {
             occurred_at: Utc::now(),
             recurring: None,
             source_channel: SourceChannel::Cli,
+            paid_by: None,
             raw_text: None,
         })
     }
