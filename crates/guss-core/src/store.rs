@@ -162,6 +162,9 @@ pub trait Store: Send + Sync {
     /// whose reversal isn't, oldest first.
     async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError>;
     async fn mark_synced(&self, id: Uuid, reverse: bool) -> Result<(), StoreError>;
+    /// Puts an entry that was stopped for good (shown in /history as "not
+    /// in Friday") back in the queue. False when entry `number` isn't one.
+    async fn resend(&self, business_id: Uuid, number: i64) -> Result<bool, StoreError>;
     /// `permanent`: never retried (shown in /history); otherwise kept for
     /// the next attempt.
     async fn mark_sync_failed(

@@ -292,13 +292,13 @@ where
         return Ok(());
     }
     let Some(role) = role_of(access, friday, user_id).await else {
-        if friday.is_some() {
-            send_text(
-                bot,
-                chat_id,
-                &telegram_ux::link_first(&language, &business_name),
-            )
-            .await?;
+        if let Some(f) = friday {
+            let reply = if linked_without_role(f, user_id).await {
+                telegram_ux::role_cant_use_guss(&language)
+            } else {
+                telegram_ux::link_first(&language, &business_name)
+            };
+            send_text(bot, chat_id, &reply).await?;
             return Ok(());
         }
         tracing::info!(user_id, "refused a message from a user who isn't allowed");
@@ -357,7 +357,7 @@ where
                 .void_entry(&actor, number, &reason)
                 .await
                 .map_err(api)?;
-            deliver(bot, access, chat_id, outcome).await?;
+            deliver(bot, access, friday, chat_id, outcome).await?;
             return Ok(());
         }
         Some(Command::Approve(ref arg)) | Some(Command::Reject(ref arg)) => {
@@ -370,7 +370,7 @@ where
                 .decide_void(&actor, number, approve)
                 .await
                 .map_err(api)?;
-            deliver(bot, access, chat_id, outcome).await?;
+            deliver(bot, access, friday, chat_id, outcome).await?;
             return Ok(());
         }
         Some(Command::PayLink(arg)) => {
@@ -380,6 +380,14 @@ where
                 (Some(customer), Some(f)) => {
                     pay_link(orchestrator, f, &actor, user_id, customer, &language).await
                 }
+            };
+            send_text(bot, chat_id, &reply).await?;
+            return Ok(());
+        }
+        Some(Command::Retry(arg)) => {
+            let reply = match telegram_ux::number_and_rest(arg.as_deref()) {
+                None => telegram_ux::retry_usage(&language),
+                Some((number, _)) => orchestrator.resend(&actor, number).await.map_err(api)?,
             };
             send_text(bot, chat_id, &reply).await?;
             return Ok(());
@@ -521,12 +529,51 @@ async fn role_of(
         return Some(Role::Owner);
     }
     match friday.people().await {
-        Ok(people) => people.by_telegram.get(&user_id).and_then(|p| p.role),
+        Ok(people) if people.by_telegram.contains_key(&user_id) => {
+            people.by_telegram.get(&user_id).and_then(|p| p.role)
+        }
+        // Not in the cached list: they may have just entered their code
+        // in Friday, so ask again rather than say "link first" for a minute.
+        Ok(_) => {
+            friday.refresh().await;
+            friday
+                .people()
+                .await
+                .ok()
+                .and_then(|p| p.by_telegram.get(&user_id).and_then(|p| p.role))
+        }
         Err(e) => {
             tracing::warn!(error = %e, "Friday unreachable; using the configured Telegram ids");
             access.role_of(user_id)
         }
     }
+}
+
+/// Linked in Friday, but with a role that can't use Guss (a viewer).
+async fn linked_without_role(friday: &FridayClient, user_id: i64) -> bool {
+    friday.people().await.is_ok_and(|p| {
+        p.by_telegram
+            .get(&user_id)
+            .is_some_and(|p| p.role.is_none())
+    })
+}
+
+/// Who hears about void requests: the owner and managers typed into
+/// Guss's settings, and every owner and manager linked through Friday
+/// (plan 16.1: linked owners never got them).
+async fn approvers(access: &TelegramAccess, friday: Option<&FridayClient>) -> Vec<i64> {
+    let mut ids = access.approver_chats();
+    if let Some(f) = friday
+        && let Ok(people) = f.people().await
+    {
+        for p in people.by_telegram.values() {
+            if matches!(p.role, Some(Role::Owner | Role::Manager)) && !ids.contains(&p.telegram_id)
+            {
+                ids.push(p.telegram_id);
+            }
+        }
+    }
+    ids
 }
 
 /// Sends the reply, then the notices for other people: void requests to
@@ -536,13 +583,14 @@ async fn role_of(
 async fn deliver(
     bot: &Bot,
     access: &TelegramAccess,
+    friday: Option<&FridayClient>,
     chat_id: ChatId,
     outcome: Outcome,
 ) -> Result<(), TelegramError> {
     send_text(bot, chat_id, &outcome.reply).await?;
     for notice in outcome.notify {
         let (targets, text) = match notice {
-            Notify::Approvers(text) => (access.approver_chats(), text),
+            Notify::Approvers(text) => (approvers(access, friday).await, text),
             Notify::Person(id, text) => {
                 match id.strip_prefix("telegram:").and_then(|n| n.parse().ok()) {
                     Some(n) => (vec![n], text),

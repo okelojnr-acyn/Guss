@@ -92,7 +92,8 @@ pub struct FridayClient {
     key: String,
     http: reqwest::Client,
     people: Mutex<Option<(Instant, Arc<People>)>>,
-    tokens: Mutex<HashMap<i64, (String, Instant)>>,
+    /// Keyed by the actor id: "telegram:<id>" or "friday:<user id>".
+    tokens: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 impl FridayClient {
@@ -193,9 +194,33 @@ impl FridayClient {
 
     /// A token to act in Friday as this person; None if they aren't linked.
     pub async fn token_for(&self, telegram_id: i64) -> Result<Option<String>, FridayError> {
+        self.token_as(
+            format!("telegram:{telegram_id}"),
+            json!({"telegram_id": telegram_id}),
+        )
+        .await
+    }
+
+    /// A token for whoever made an entry: a linked Telegram person, or a
+    /// Friday user who typed into the Guss widget in Friday
+    /// ("friday:<user id>"). None for anyone else, or if not linked.
+    pub async fn token_for_actor(&self, actor_id: &str) -> Result<Option<String>, FridayError> {
+        if let Some(t) = telegram_id_of(actor_id) {
+            return self.token_for(t).await;
+        }
+        match actor_id.strip_prefix("friday:") {
+            Some(user) if !user.is_empty() => {
+                self.token_as(actor_id.to_string(), json!({"user_id": user}))
+                    .await
+            }
+            _ => Ok(None),
+        }
+    }
+
+    async fn token_as(&self, key: String, body: Value) -> Result<Option<String>, FridayError> {
         {
             let tokens = self.tokens.lock().await;
-            if let Some((token, until)) = tokens.get(&telegram_id)
+            if let Some((token, until)) = tokens.get(&key)
                 && Instant::now() < *until
             {
                 return Ok(Some(token.clone()));
@@ -205,7 +230,7 @@ impl FridayClient {
             .http
             .post(format!("{}/guss/svc/token", self.base))
             .bearer_auth(&self.key)
-            .json(&json!({"telegram_id": telegram_id}))
+            .json(&body)
             .send()
             .await
             .map_err(Self::net)?;
@@ -218,7 +243,7 @@ impl FridayClient {
         self.tokens
             .lock()
             .await
-            .insert(telegram_id, (wire.token.clone(), until));
+            .insert(key, (wire.token.clone(), until));
         Ok(Some(wire.token))
     }
 

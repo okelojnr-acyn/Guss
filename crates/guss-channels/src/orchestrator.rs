@@ -786,6 +786,18 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         Ok(())
     }
 
+    /// "/retry 12": an entry stopped from reaching Friday (shown in
+    /// /history) goes again on the next sync round. Owners and managers
+    /// only: it can put an old entry into the books.
+    pub async fn resend(&self, actor: &Actor, number: i64) -> Result<String, OrchestratorError> {
+        let language = self.business.language.as_str();
+        if !actor.role.can(Action::VoidDirectly) {
+            return Ok(texts::retry_not_allowed(language).to_string());
+        }
+        let queued = self.store.resend(self.business.id, number).await?;
+        Ok(texts::retry_result(number, queued, language))
+    }
+
     pub async fn history(&self, limit: i64) -> Result<String, OrchestratorError> {
         let language = self.business.language.as_str();
         let entries = self.store.journal(self.business.id, limit).await?;
@@ -811,6 +823,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         }
         if let Some(err) = &e.sync_error {
             line.push_str(&texts::not_in_friday(err, language));
+            line.push_str(&format!(" /retry {}", e.number));
         }
         line
     }

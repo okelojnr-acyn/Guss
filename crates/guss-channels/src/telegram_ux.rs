@@ -90,6 +90,8 @@ pub enum Command {
     Link,
     /// "/paylink John": a Paystack link for everything John owes.
     PayLink(Option<String>),
+    /// "/retry 12": send entry 12 to Friday again (it was stopped).
+    Retry(Option<String>),
     Unknown,
 }
 
@@ -115,6 +117,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "reject" | "tolak" => Command::Reject(arg),
         "link" | "tautkan" => Command::Link,
         "paylink" | "tautanbayar" | "kiungo" => Command::PayLink(arg),
+        "retry" | "kirimulang" | "tumatena" => Command::Retry(arg),
         _ => Command::Unknown,
     })
 }
@@ -142,17 +145,17 @@ pub fn number_and_rest(arg: Option<&str>) -> Option<(i64, String)> {
 pub fn link_code(language: &str, code: &str) -> String {
     if is_id(language) {
         format!(
-            "Kode Anda: {code}\n\nBuka Friday: Pengaturan, Integrasi, Guss, Tautkan Telegram, lalu \
+            "Kode Anda: {code}\n\nBuka Friday: Aplikasi & integrasi, Guss, Tautkan Telegram, lalu \
              masukkan kode ini dalam 10 menit. Setelah itu peran Anda di Friday berlaku di sini."
         )
     } else if is_sw(language) {
         format!(
-            "Nambari yako: {code}\n\nFungua Friday: Mipangilio, Miunganisho, Guss, Unganisha Telegram, \
+            "Nambari yako: {code}\n\nFungua Friday: Programu na miunganisho, Guss, Unganisha Telegram, \
              kisha uiweke ndani ya dakika 10. Baada ya hapo jukumu lako la Friday litatumika hapa."
         )
     } else {
         format!(
-            "Your code: {code}\n\nOpen Friday: Settings, Integrations, Guss, Link your Telegram, and \
+            "Your code: {code}\n\nOpen Friday: Apps & integrations, Guss, Link your Telegram, and \
              enter it within 10 minutes. After that your Friday role applies here."
         )
     }
@@ -194,6 +197,32 @@ pub fn link_first(language: &str, business: &str) -> String {
         format!(
             "Hi! This is {business}'s shop assistant. Send /link to connect your Friday account first."
         )
+    }
+}
+
+pub fn role_cant_use_guss(language: &str) -> String {
+    if is_id(language) {
+        "Akun Telegram Anda sudah tertaut, tetapi peran Anda di Friday (hanya lihat) tidak bisa memakai Guss. \
+         Minta pemilik mengubah peran Anda di Friday."
+            .into()
+    } else if is_sw(language) {
+        "Telegram yako imeunganishwa, lakini jukumu lako la Friday (kuangalia tu) haliwezi kutumia Guss. \
+         Mwombe mwenye duka abadilishe jukumu lako kwenye Friday."
+            .into()
+    } else {
+        "Your Telegram is linked, but your Friday role (view only) can't use Guss. \
+         Ask the owner to change your role in Friday."
+            .into()
+    }
+}
+
+pub fn retry_usage(language: &str) -> String {
+    if is_id(language) {
+        "Tulis nomor catatan: /retry 12. Nomor ada di /history.".into()
+    } else if is_sw(language) {
+        "Andika nambari ya rekodi: /retry 12. Nambari ziko kwenye /history.".into()
+    } else {
+        "Say which entry: /retry 12. The numbers are in /history.".into()
     }
 }
 

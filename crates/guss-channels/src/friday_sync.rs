@@ -28,7 +28,7 @@ use guss_core::store::{Store, StoreError, SyncItem};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::friday::{FridayClient, FridayError, telegram_id_of};
+use crate::friday::{FridayClient, FridayError};
 use crate::items::normalize_name;
 
 pub const SYNC_EVERY: Duration = Duration::from_secs(30);
@@ -46,6 +46,9 @@ const SHOP_EXPENSES: (&str, &str) = ("6900", "Shop expenses");
 struct Failure {
     message: String,
     permanent: bool,
+    /// Waits for someone to act (link their account, grant Guss access):
+    /// retried every round, without holding up the other entries.
+    waiting: bool,
 }
 
 impl From<FridayError> for Failure {
@@ -53,6 +56,7 @@ impl From<FridayError> for Failure {
         Failure {
             permanent: !e.is_transient(),
             message: e.to_string(),
+            waiting: false,
         }
     }
 }
@@ -61,6 +65,18 @@ fn permanent(message: impl Into<String>) -> Failure {
     Failure {
         message: message.into(),
         permanent: true,
+        waiting: false,
+    }
+}
+
+/// Found 2026-11-22: entries stopped for good by "not linked" or "no
+/// access" stayed out of Friday after the person linked or access was
+/// granted, and /history kept saying "not linked".
+fn waiting(message: impl Into<String>) -> Failure {
+    Failure {
+        message: message.into(),
+        permanent: false,
+        waiting: true,
     }
 }
 
@@ -80,7 +96,7 @@ pub async fn sync_once<S: Store + ?Sized>(
             }
             Err(f) => {
                 store.mark_sync_failed(id, &f.message, f.permanent).await?;
-                if !f.permanent {
+                if !f.permanent && !f.waiting {
                     // Friday is down or slow: stop this round, retry later.
                     tracing::warn!(error = %f.message, "Friday sync paused");
                     break;
@@ -126,10 +142,10 @@ pub async fn check_pay_links<S: Store + ?Sized>(
         if entry.voided.is_some() || n.occurred_at < since || closed.contains(reference) {
             continue;
         }
-        let Some(telegram_id) = entry.recorded_by_id.as_deref().and_then(telegram_id_of) else {
-            continue;
-        };
-        let token = match friday.token_for(telegram_id).await {
+        let token = match friday
+            .token_for_actor(entry.recorded_by_id.as_deref().unwrap_or_default())
+            .await
+        {
             Ok(Some(t)) => t,
             _ => continue,
         };
@@ -283,27 +299,25 @@ async fn push(
     let to_inventory = stock.is_some() && people.can_write("inventory");
     let to_accounting = book.is_some() && people.can_write("accounting");
     if (sale.is_some() || debt.is_some()) && !people.can_write("invoicing") {
-        return Err(permanent(
-            "Guss may not record sales in Friday (Friday: Integrations, Guss: Invoicing)",
+        return Err(waiting(
+            "Guss may not record sales in Friday yet (Friday: Apps & integrations, Guss: Invoicing)",
         ));
     }
     if sale.is_none() && debt.is_none() && !to_inventory && !to_accounting {
-        return Err(permanent(
-            "Guss may not change Inventory or Accounting (Friday: Integrations, Guss)",
+        return Err(waiting(
+            "Guss may not change Inventory or Accounting yet (Friday: Apps & integrations, Guss)",
         ));
     }
     let who = entry
         .recorded_by
         .clone()
         .unwrap_or_else(|| "someone".into());
-    let Some(telegram_id) = entry.recorded_by_id.as_deref().and_then(telegram_id_of) else {
-        return Err(permanent(format!(
-            "recorded by {who}, who isn't linked to Friday"
-        )));
-    };
-    let Some(token) = friday.token_for(telegram_id).await? else {
-        return Err(permanent(format!(
-            "{who} isn't linked to Friday (send /link)"
+    let Some(token) = friday
+        .token_for_actor(entry.recorded_by_id.as_deref().unwrap_or_default())
+        .await?
+    else {
+        return Err(waiting(format!(
+            "{who} isn't linked to Friday yet (send /link)"
         )));
     };
     if let Some(s) = sale {
@@ -1007,9 +1021,12 @@ mod tests {
         let journal = store.journal(business_id, 5).await.unwrap();
         assert_eq!(
             journal[0].sync_error.as_deref(),
-            Some("Guss may not record sales in Friday (Friday: Integrations, Guss: Invoicing)")
+            Some(
+                "Guss may not record sales in Friday yet (Friday: Apps & integrations, Guss: Invoicing)"
+            )
         );
-        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
+        // Still waiting: it goes as soon as access is granted.
+        assert_eq!(store.to_sync(business_id, 10).await.unwrap().len(), 1);
 
         // Write access, but the author isn't linked.
         let server = friday_with(json!({"invoicing": "write"})).await;
@@ -1025,8 +1042,74 @@ mod tests {
         let journal = store.journal(business_id, 5).await.unwrap();
         assert_eq!(
             journal[0].sync_error.as_deref(),
-            Some("Sam isn't linked to Friday (send /link)")
+            Some("Sam isn't linked to Friday yet (send /link)")
         );
+        assert!(
+            store
+                .to_sync(business_id, 10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|i| i.entry.recorded_by.as_deref() == Some("Sam"))
+        );
+    }
+
+    #[tokio::test]
+    async fn widget_entries_act_as_the_friday_user_who_typed_them() {
+        let server = friday("write").await;
+        Mock::given(method("POST"))
+            .and(path("/guss/svc/token"))
+            .and(body_partial_json(json!({"user_id": "u-amina"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"token": "jwt-amina", "expires_in": 600})),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(
+            client
+                .token_for_actor("friday:u-amina")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("jwt-amina")
+        );
+        assert_eq!(
+            client
+                .token_for_actor("telegram:7")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(TOKEN)
+        );
+        assert_eq!(client.token_for_actor("web").await.unwrap(), None);
+        assert_eq!(client.token_for_actor("friday:").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_entry_stopped_for_good_can_be_sent_again() {
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let soda = sale(business_id, "soda", 1.0);
+        store.save_event_by(&soda, Some(&mary)).await.unwrap();
+        store
+            .mark_sync_failed(soda.id(), "old reason", true)
+            .await
+            .unwrap();
+        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
+        let number = store.journal(business_id, 1).await.unwrap()[0].number;
+
+        assert!(store.resend(business_id, number).await.unwrap());
+        assert_eq!(store.to_sync(business_id, 10).await.unwrap().len(), 1);
+        assert_eq!(
+            store.journal(business_id, 1).await.unwrap()[0].sync_error,
+            None
+        );
+        // Only stopped entries: a second resend changes nothing.
+        assert!(!store.resend(business_id, number).await.unwrap());
     }
 
     #[tokio::test]

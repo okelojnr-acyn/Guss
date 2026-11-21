@@ -123,6 +123,14 @@ impl Store for AnyStore {
         }
     }
 
+    async fn resend(&self, business_id: Uuid, number: i64) -> Result<bool, StoreError> {
+        match self {
+            AnyStore::Sqlite(s) => s.resend(business_id, number).await,
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(s) => s.resend(business_id, number).await,
+        }
+    }
+
     async fn mark_sync_failed(
         &self,
         id: Uuid,

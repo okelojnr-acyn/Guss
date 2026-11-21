@@ -200,6 +200,29 @@ pub fn longer_reports_not_allowed(language: &str) -> &'static str {
     )
 }
 
+pub fn retry_not_allowed(language: &str) -> &'static str {
+    match lang(language) {
+        Lang::Id => "Hanya pemilik atau manajer yang bisa mengirim ulang catatan ke Friday.",
+        Lang::Sw => "Mwenye duka au meneja pekee ndiye anaweza kutuma rekodi tena kwa Friday.",
+        Lang::En => "Only the owner or a manager can send an entry to Friday again.",
+    }
+}
+
+pub fn retry_result(number: i64, queued: bool, language: &str) -> String {
+    match (lang(language), queued) {
+        (Lang::Id, true) => format!("Catatan #{number} dikirim lagi ke Friday dalam 30 detik."),
+        (Lang::Id, false) => {
+            format!("Catatan #{number} tidak tertahan; tidak ada yang perlu dikirim ulang.")
+        }
+        (Lang::Sw, true) => {
+            format!("Rekodi #{number} itatumwa tena kwa Friday ndani ya sekunde 30.")
+        }
+        (Lang::Sw, false) => format!("Rekodi #{number} haijazuiwa; hakuna cha kutuma tena."),
+        (Lang::En, true) => format!("Entry #{number} goes to Friday again within 30 seconds."),
+        (Lang::En, false) => format!("Entry #{number} isn't stopped; nothing to send again."),
+    }
+}
+
 pub fn not_in_friday(why: &str, language: &str) -> String {
     match lang(language) {
         Lang::Id => format!(" [belum di Friday: {why}]"),
