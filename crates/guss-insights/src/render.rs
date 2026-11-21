@@ -6,6 +6,7 @@ use crate::aggregate::ReportData;
 
 const TEMPLATE_EN: &str = include_str!("../templates/en/report.hbs");
 const TEMPLATE_ID: &str = include_str!("../templates/id/report.hbs");
+const TEMPLATE_SW: &str = include_str!("../templates/sw/report.hbs");
 
 #[derive(Serialize)]
 struct ItemStatView {
@@ -60,6 +61,9 @@ fn window_label(window: TimeWindow, language: &str) -> String {
         (TimeWindow::Day, "id") => "hari ini".to_string(),
         (TimeWindow::Week, "id") => "7 hari terakhir".to_string(),
         (TimeWindow::Month, "id") => "30 hari terakhir".to_string(),
+        (TimeWindow::Day, "sw") => "leo".to_string(),
+        (TimeWindow::Week, "sw") => "siku 7 zilizopita".to_string(),
+        (TimeWindow::Month, "sw") => "siku 30 zilizopita".to_string(),
         (TimeWindow::Day, _) => "today".to_string(),
         (TimeWindow::Week, _) => "the last 7 days".to_string(),
         (TimeWindow::Month, _) => "the last 30 days".to_string(),
@@ -83,13 +87,14 @@ fn items_view(items: &[crate::aggregate::ItemStat]) -> Vec<ItemStatView> {
 }
 
 /// Renders a `ReportData` into a natural-language string in the given
-/// language ("en" or "id"), ready to be handed to TTS and/or sent as text.
+/// language ("en", "id" or "sw"), ready to be handed to TTS and/or sent as text.
 pub fn render_report(data: &ReportData, business_name: &str, language: &str) -> String {
     let mut hb = Handlebars::new();
     hb.set_strict_mode(false);
 
     let (template, lang_key) = match language {
         "id" => (TEMPLATE_ID, "id"),
+        "sw" => (TEMPLATE_SW, "sw"),
         _ => (TEMPLATE_EN, "en"),
     };
 
@@ -210,6 +215,14 @@ mod tests {
         assert!(text.contains("1500.00 USD"));
         assert!(text.contains("rice"));
         assert!(text.contains("soap"));
+    }
+
+    #[test]
+    fn swahili_report_mentions_key_figures() {
+        let text = render_report(&sample_report(), "Duka la Mama", "sw");
+        assert!(text.starts_with("Hii ni ripoti ya Duka la Mama"), "{text}");
+        assert!(text.contains("1500.00 USD"));
+        assert!(text.contains("rice") && text.contains("soap"));
     }
 
     #[test]

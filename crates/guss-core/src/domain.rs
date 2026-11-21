@@ -232,7 +232,8 @@ pub struct BusinessProfile {
     pub id: Uuid,
     pub name: String,
     pub default_currency: String,
-    /// "en" or "id" - selects NLU prompt language and report templates.
+    /// "en", "id" or "sw" - selects reply language, NLU prompt and report
+    /// templates ("sw" uses the English prompt, which reads Swahili).
     pub language: String,
     pub timezone: String,
 }
