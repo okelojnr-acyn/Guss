@@ -30,6 +30,24 @@ pub enum ExtractedEvent {
         /// How the customer paid, only when said ("paid by M-Pesa", "kwa mpesa", "pakai kartu"). Null if not said.
         #[serde(default)]
         paid_by: Option<PaidBy>,
+        /// The customer's name when sold ON CREDIT ("sold to John on credit", "deni", "utang", "bon"). Null when paid now.
+        #[serde(default)]
+        credit_to: Option<String>,
+    },
+    /// A customer brought something back ("John returned 1 rice", "dikembalikan"). Guss finds the sale and its price.
+    Return {
+        item_name: String,
+        /// How many came back, positive. 1 if not said.
+        quantity: f64,
+        unit: Option<String>,
+    },
+    /// A customer paying what they owe for earlier credit sales ("John paid 500", "John amelipa deni 500", "Budi bayar utang 50.000").
+    DebtPayment {
+        customer: String,
+        amount_major: f64,
+        currency: Option<String>,
+        #[serde(default)]
+        paid_by: Option<PaidBy>,
     },
     /// Money paid out for anything that is NOT stock bought to resell:
     /// rent, transport, fees, wages, subscriptions, and things for the
@@ -114,5 +132,10 @@ pub enum Question {
         period: String,
         /// The item or expense asked about ("transport", "rice"). Null for everything.
         about: Option<String>,
+    },
+    /// "how much does John owe?", "who owes me?", "utang Budi berapa?"
+    Owed {
+        /// The customer asked about. Null for everyone.
+        customer: Option<String>,
     },
 }

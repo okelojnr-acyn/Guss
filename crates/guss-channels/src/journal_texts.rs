@@ -329,3 +329,53 @@ pub fn outlier_dropped(language: &str) -> String {
         "(The unusual price was not saved.)".to_string()
     }
 }
+
+/// "returned 1 rice" with no earlier rice sale to give back.
+pub fn nothing_to_return(item: &str, language: &str) -> String {
+    if id(language) {
+        format!("Belum ada penjualan {item} yang bisa dikembalikan. Tidak ada yang disimpan.")
+    } else {
+        format!("I can't find a sale of {item} to take back. Nothing was saved.")
+    }
+}
+
+/// "how much does John owe?"
+pub fn owed_one(customer: &str, amount: Option<String>, language: &str) -> String {
+    match (amount, id(language)) {
+        (Some(a), true) => format!("Utang {customer}: {a}."),
+        (Some(a), false) => format!("{customer} owes {a}."),
+        (None, true) => format!("{customer} tidak punya utang."),
+        (None, false) => format!("{customer} doesn't owe anything."),
+    }
+}
+
+/// "who owes me?"
+pub fn owed_all(rows: &[(String, String)], language: &str) -> String {
+    if rows.is_empty() {
+        return if id(language) {
+            "Tidak ada yang punya utang.".into()
+        } else {
+            "Nobody owes you anything.".into()
+        };
+    }
+    let lines: Vec<String> = rows.iter().map(|(n, a)| format!("- {n}: {a}")).collect();
+    let title = if id(language) {
+        "Yang punya utang:"
+    } else {
+        "Owed to you:"
+    };
+    format!("{title}\n{}", lines.join("\n"))
+}
+
+/// "returned 1 sugar" when the sugar went on credit and isn't paid.
+pub fn return_of_credit_sale(item: &str, customer: &str, language: &str) -> String {
+    if id(language) {
+        format!(
+            "{item} itu dijual utang ke {customer}. Batalkan penjualannya dengan /void lalu catat ulang yang benar. Tidak ada yang disimpan."
+        )
+    } else {
+        format!(
+            "That {item} went on credit to {customer}. Void that sale (/void) and record what they kept instead. Nothing was saved."
+        )
+    }
+}

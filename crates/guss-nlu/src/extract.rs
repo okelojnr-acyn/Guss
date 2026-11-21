@@ -1,5 +1,7 @@
 use chrono::Utc;
-use guss_core::domain::{BusinessEvent, Expense, Note, Sale, SourceChannel, StockUpdate};
+use guss_core::domain::{
+    BusinessEvent, DebtPayment, Expense, Note, Sale, SourceChannel, StockUpdate,
+};
 use guss_core::money::CurrencyAmount;
 use guss_llm::{JsonCompletionRequest, LlmError, LlmProvider};
 use thiserror::Error;
@@ -278,6 +280,7 @@ fn to_business_event(
             currency,
             category,
             paid_by,
+            credit_to,
         } => {
             if quantity <= 0.0 {
                 return Err(Issue::NotPositive {
@@ -307,6 +310,10 @@ fn to_business_event(
                 recurring: None,
                 source_channel,
                 paid_by: paid_by.map(|m| m.as_str().to_string()),
+                credit_to: credit_to
+                    .map(|c| c.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|c| !c.is_empty()),
+                returns: None,
                 raw_text: Some(raw_text.to_string()),
             })
         }
@@ -358,6 +365,63 @@ fn to_business_event(
                 unit_factor: 1.0,
                 unit_cost: cost.map(|c| CurrencyAmount::new(c, default_currency.to_string())),
                 reorder_threshold,
+                occurred_at: now,
+                source_channel,
+                raw_text: Some(raw_text.to_string()),
+            })
+        }
+        // The price and the sale it gives back are filled in from the
+        // books before it's saved (orchestrator), not guessed here.
+        ExtractedEvent::Return {
+            item_name,
+            quantity,
+            unit,
+        } => {
+            if quantity <= 0.0 {
+                return Err(Issue::NotPositive {
+                    what: item_name,
+                    value: quantity,
+                });
+            }
+            BusinessEvent::Sale(Sale {
+                id: Uuid::new_v4(),
+                business_id,
+                item_name,
+                quantity: -quantity,
+                unit,
+                unit_factor: 1.0,
+                unit_price: CurrencyAmount::new(0.0, default_currency.to_string()),
+                category: None,
+                occurred_at: now,
+                recurring: None,
+                source_channel,
+                paid_by: None,
+                credit_to: None,
+                returns: None,
+                raw_text: Some(raw_text.to_string()),
+            })
+        }
+        ExtractedEvent::DebtPayment {
+            customer,
+            amount_major,
+            currency,
+            paid_by,
+        } => {
+            if amount_major <= 0.0 {
+                return Err(Issue::NotPositive {
+                    what: customer,
+                    value: amount_major,
+                });
+            }
+            BusinessEvent::DebtPayment(DebtPayment {
+                id: Uuid::new_v4(),
+                business_id,
+                customer: customer.split_whitespace().collect::<Vec<_>>().join(" "),
+                amount: CurrencyAmount::new(
+                    amount_major,
+                    currency.unwrap_or_else(|| default_currency.to_string()),
+                ),
+                paid_by: paid_by.map(|m| m.as_str().to_string()),
                 occurred_at: now,
                 source_channel,
                 raw_text: Some(raw_text.to_string()),

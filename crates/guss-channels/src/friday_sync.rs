@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use guss_core::domain::{BusinessEvent, BusinessProfile, Sale};
+use guss_core::domain::{BusinessEvent, BusinessProfile, DebtPayment, Sale};
 use guss_core::store::{Store, StoreError, SyncItem};
 use serde_json::{Value, json};
 
@@ -145,6 +145,7 @@ fn occurred_at(event: &BusinessEvent) -> DateTime<Utc> {
         BusinessEvent::Expense(x) => x.occurred_at,
         BusinessEvent::StockUpdate(su) => su.occurred_at,
         BusinessEvent::Note(n) => n.occurred_at,
+        BusinessEvent::DebtPayment(d) => d.occurred_at,
     }
 }
 
@@ -158,20 +159,24 @@ async fn push(
         BusinessEvent::Sale(s) => Some(s),
         _ => None,
     };
+    let debt = match &entry.event {
+        BusinessEvent::DebtPayment(d) => Some(d),
+        _ => None,
+    };
     let stock = stock_change(&entry.event);
     let book = booking(&entry.event);
-    if sale.is_none() && stock.is_none() && book.is_none() {
+    if sale.is_none() && debt.is_none() && stock.is_none() && book.is_none() {
         return Ok(());
     }
     let people = friday.people().await?;
     let to_inventory = stock.is_some() && people.can_write("inventory");
     let to_accounting = book.is_some() && people.can_write("accounting");
-    if sale.is_some() && !people.can_write("invoicing") {
+    if (sale.is_some() || debt.is_some()) && !people.can_write("invoicing") {
         return Err(permanent(
             "Guss may not record sales in Friday (Friday: Integrations, Guss: Invoicing)",
         ));
     }
-    if sale.is_none() && !to_inventory && !to_accounting {
+    if sale.is_none() && debt.is_none() && !to_inventory && !to_accounting {
         return Err(permanent(
             "Guss may not change Inventory or Accounting (Friday: Integrations, Guss)",
         ));
@@ -191,7 +196,13 @@ async fn push(
         )));
     };
     if let Some(s) = sale {
+        if s.quantity < 0.0 {
+            return push_return(friday, &token, item.reverse, s).await;
+        }
         return push_sale(friday, business, &token, item.reverse, s).await;
+    }
+    if let Some(d) = debt {
+        return push_debt_payment(friday, business, &token, item.reverse, d).await;
     }
     let id = entry.event.id();
     let reference = if item.reverse {
@@ -351,23 +362,141 @@ async fn push_sale(
         line["uom"] = json!(unit);
         line["uom_factor"] = json!(s.unit_factor);
     }
+    let mut body = json!({
+        "client_sale_id": reference,
+        "channel": "guss",
+        "currency": total.currency,
+        // As said ("paid by mpesa"); unsaid counts as cash.
+        "method": s.paid_by.as_deref().unwrap_or("cash"),
+        "amount_cents": total.amount.minor_units,
+        "created_at_ms": s.occurred_at.timestamp_millis(),
+        "lines": [line],
+    });
+    if let Some(who) = &s.credit_to {
+        // Unpaid against the customer until a DebtPayment.
+        body["on_credit"] = json!(true);
+        body["customer_name"] = json!(who);
+    }
     friday
-        .post(
-            token,
-            "/api/invoicing/pos/sales",
-            &json!({
-                "client_sale_id": reference,
-                "channel": "guss",
-                "currency": total.currency,
-                // As said ("paid by mpesa"); unsaid counts as cash.
-                "method": s.paid_by.as_deref().unwrap_or("cash"),
-                "amount_cents": total.amount.minor_units,
-                "created_at_ms": s.occurred_at.timestamp_millis(),
-                "lines": [line],
-            }),
-        )
+        .post(token, "/api/invoicing/pos/sales", &body)
         .await?;
     Ok(())
+}
+
+/// A return ("returned 1 rice") gives back part of the Guss sale it
+/// names, at that sale's price; Friday refunds once per return id. Friday
+/// can't take a return back, so voiding one asks for a fresh sale.
+async fn push_return(
+    friday: &FridayClient,
+    token: &str,
+    reverse: bool,
+    r: &Sale,
+) -> Result<(), Failure> {
+    if reverse {
+        return Err(permanent(
+            "Friday can't undo a return; record the sale again instead",
+        ));
+    }
+    let original = r
+        .returns
+        .ok_or_else(|| permanent("this return doesn't name the sale it gives back"))?;
+    let found = match friday
+        .get(token, &format!("/api/invoicing/pos/sales/guss:{original}"))
+        .await
+    {
+        Ok(v) => v,
+        Err(FridayError::Status { status: 404, .. }) => {
+            return Err(permanent("the sale it gives back isn't in Friday"));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let number = found
+        .get("number")
+        .and_then(Value::as_str)
+        .ok_or_else(|| permanent("Friday sent a sale without a number"))?;
+    let line = found
+        .get("lines")
+        .and_then(Value::as_array)
+        .and_then(|l| l.first())
+        .ok_or_else(|| permanent("Friday sent a sale without lines"))?;
+    let line_id = line
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| permanent("Friday sent a sale line without an id"))?;
+    // Friday counts the line in the unit it was sold in.
+    let factor = line
+        .get("uom_factor")
+        .and_then(|f| {
+            f.as_f64()
+                .or_else(|| f.as_str().and_then(|s| s.parse().ok()))
+        })
+        .filter(|f| *f > 0.0)
+        .unwrap_or(1.0);
+    let quantity = ((r.base_quantity().abs() / factor) * 1000.0).round() / 1000.0;
+    match friday
+        .post(
+            token,
+            &format!("/api/invoicing/pos/sales/{number}/return"),
+            &json!({
+                "client_return_id": format!("guss:{}", r.id),
+                "lines": [{"line_id": line_id, "quantity": quantity}],
+            }),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(FridayError::Status {
+            status: 400 | 409 | 422,
+            body,
+        }) => Err(permanent(format!("Friday refused the return: {body}"))),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// "John paid 500": settles John's oldest unpaid credit sales in Friday,
+/// once per payment id. Voiding it can't take the money back there.
+async fn push_debt_payment(
+    friday: &FridayClient,
+    business: &BusinessProfile,
+    token: &str,
+    reverse: bool,
+    d: &DebtPayment,
+) -> Result<(), Failure> {
+    if reverse {
+        return Err(permanent(
+            "this payment is in Friday; correct it there (Invoicing)",
+        ));
+    }
+    if !d
+        .amount
+        .currency
+        .eq_ignore_ascii_case(business.default_currency.trim())
+    {
+        return Err(permanent(format!(
+            "in {}; Friday records payments in {} only",
+            d.amount.currency, business.default_currency
+        )));
+    }
+    match friday
+        .post(
+            token,
+            "/api/invoicing/pos/debts/payments",
+            &json!({
+                "customer_name": d.customer,
+                "amount_cents": d.amount.amount.minor_units,
+                "method": d.paid_by.as_deref().unwrap_or("cash"),
+                "client_payment_id": format!("guss:{}", d.id),
+            }),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(FridayError::Status {
+            status: 404 | 409 | 422,
+            body,
+        }) => Err(permanent(format!("Friday refused the payment: {body}"))),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The org's accounts, adding "6900 Shop expenses" the first time.
@@ -444,7 +573,7 @@ async fn find_or_create_product(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use guss_core::domain::{Expense, Sale, SourceChannel, StockUpdate};
+    use guss_core::domain::{DebtPayment, Expense, Sale, SourceChannel, StockUpdate};
     use guss_core::money::CurrencyAmount;
     use guss_core::people::{Actor, Role};
     use guss_store::SqliteStore;
@@ -485,6 +614,8 @@ mod tests {
             recurring: None,
             source_channel: SourceChannel::Telegram,
             paid_by: None,
+            credit_to: None,
+            returns: None,
             raw_text: None,
         })
     }
@@ -795,6 +926,100 @@ mod tests {
         assert_eq!(
             journal[0].sync_error.as_deref(),
             Some("in USD; Friday records sales in KES only")
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_sales_returns_and_debt_payments_reach_friday() {
+        let server = friday_with(json!({"invoicing": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+
+        let mut credit = sale(business_id, "Sugar", 2.0);
+        if let BusinessEvent::Sale(s) = &mut credit {
+            s.credit_to = Some("John".into());
+        }
+        let sold = sale(business_id, "Rice", 3.0);
+        let mut back = sale(business_id, "Rice", -1.0);
+        if let BusinessEvent::Sale(s) = &mut back {
+            s.returns = Some(sold.id());
+        }
+        let paid = BusinessEvent::DebtPayment(DebtPayment {
+            id: Uuid::new_v4(),
+            business_id,
+            customer: "John".into(),
+            amount: CurrencyAmount::new(100.0, "KES"),
+            paid_by: Some("mpesa".into()),
+            occurred_at: Utc::now(),
+            source_channel: SourceChannel::Telegram,
+            raw_text: None,
+        });
+        for e in [&credit, &sold, &back, &paid] {
+            store.save_event_by(e, Some(&mary)).await.unwrap();
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/api/inventory/products"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/inventory/products"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "p-1"})))
+            .mount(&server)
+            .await;
+        // On credit: unpaid against John.
+        Mock::given(method("POST"))
+            .and(path("/api/invoicing/pos/sales"))
+            .and(body_partial_json(
+                json!({"on_credit": true, "customer_name": "John"}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number": "POS-C"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/invoicing/pos/sales"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number": "POS-R"})))
+            .mount(&server)
+            .await;
+        // The return finds the rice sale and gives back one, once.
+        Mock::given(method("GET"))
+            .and(path(format!("/api/invoicing/pos/sales/guss:{}", sold.id())))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "number": "POS-R", "status": "paid",
+                "lines": [{"id": "line-1", "quantity": "3.000", "uom_factor": null}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/invoicing/pos/sales/POS-R/return"))
+            .and(body_partial_json(json!({
+                "client_return_id": format!("guss:{}", back.id()),
+                "lines": [{"line_id": "line-1", "quantity": 1.0}]
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number": "RET-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/invoicing/pos/debts/payments"))
+            .and(body_partial_json(json!({
+                "customer_name": "John", "amount_cents": 10000, "method": "mpesa",
+                "client_payment_id": format!("guss:{}", paid.id())
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"owed_cents": 6000})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            4
         );
     }
 

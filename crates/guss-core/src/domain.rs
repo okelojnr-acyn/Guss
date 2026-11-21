@@ -66,6 +66,14 @@ pub struct Sale {
     /// "airtel", "card" or "bank". None = not said (Friday books cash).
     #[serde(default)]
     pub paid_by: Option<String>,
+    /// Sold on credit to this customer ("sold to John on credit"): they
+    /// owe it until a DebtPayment. None = paid now.
+    #[serde(default)]
+    pub credit_to: Option<String>,
+    /// A return: `quantity` is negative and this is the sale it gives
+    /// back ("returned 1 rice" -> the latest rice sale).
+    #[serde(default)]
+    pub returns: Option<Uuid>,
     /// Original utterance this was extracted from, kept for audit/debug.
     pub raw_text: Option<String>,
 }
@@ -159,6 +167,21 @@ pub struct Note {
     pub source_channel: SourceChannel,
 }
 
+/// A customer paying what they owe for credit sales ("John paid 500").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DebtPayment {
+    pub id: Uuid,
+    pub business_id: Uuid,
+    pub customer: String,
+    pub amount: CurrencyAmount,
+    /// "cash", "mpesa", "airtel", "card" or "bank"; None = not said.
+    #[serde(default)]
+    pub paid_by: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+    pub source_channel: SourceChannel,
+    pub raw_text: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum BusinessEvent {
@@ -166,6 +189,7 @@ pub enum BusinessEvent {
     Expense(Expense),
     StockUpdate(StockUpdate),
     Note(Note),
+    DebtPayment(DebtPayment),
 }
 
 impl BusinessEvent {
@@ -175,6 +199,7 @@ impl BusinessEvent {
             BusinessEvent::Expense(e) => e.id,
             BusinessEvent::StockUpdate(e) => e.id,
             BusinessEvent::Note(e) => e.id,
+            BusinessEvent::DebtPayment(e) => e.id,
         }
     }
 
@@ -184,6 +209,7 @@ impl BusinessEvent {
             BusinessEvent::Expense(e) => e.business_id,
             BusinessEvent::StockUpdate(e) => e.business_id,
             BusinessEvent::Note(e) => e.business_id,
+            BusinessEvent::DebtPayment(e) => e.business_id,
         }
     }
 
@@ -193,6 +219,7 @@ impl BusinessEvent {
             BusinessEvent::Expense(e) => e.occurred_at,
             BusinessEvent::StockUpdate(e) => e.occurred_at,
             BusinessEvent::Note(e) => e.occurred_at,
+            BusinessEvent::DebtPayment(e) => e.occurred_at,
         }
     }
 }
@@ -240,6 +267,8 @@ mod tests {
             recurring: None,
             source_channel: SourceChannel::Cli,
             paid_by: None,
+            credit_to: None,
+            returns: None,
             raw_text: None,
         }
     }
