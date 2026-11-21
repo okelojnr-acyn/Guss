@@ -133,6 +133,10 @@ impl Catalog {
             .collect();
         Some(match language {
             "id" => format!("Barang toko ini (pakai nama ini): {}", list.join(", ")),
+            "sw" => format!(
+                "Bidhaa za duka hili (tumia majina haya): {}",
+                list.join(", ")
+            ),
             _ => format!("This shop's items (use these names): {}", list.join(", ")),
         })
     }
@@ -228,6 +232,13 @@ pub fn unit_question_text(q: &UnitQuestion, language: &str) -> String {
         "id" => format!(
             "Berapa {base} dalam satu {unit} {item}? Balas dengan angka, misalnya 24. \
              Belum ada yang disimpan.",
+            base = q.base,
+            unit = q.unit,
+            item = q.item
+        ),
+        "sw" => format!(
+            "{base} ngapi ziko kwenye {unit} moja ya {item}? Jibu kwa namba, kwa mfano 24. \
+             Bado hakuna kilichohifadhiwa.",
             base = q.base,
             unit = q.unit,
             item = q.item

@@ -116,14 +116,14 @@ pub fn parse_command(text: &str) -> Option<Command> {
     })
 }
 
-/// "today"/"week"/"month" (and Indonesian) -> report window; None = today.
+/// "today"/"week"/"month" (and Indonesian, Swahili) -> report window; None = today.
 pub fn report_window(arg: Option<&str>) -> Option<guss_core::store::TimeWindow> {
     use guss_core::store::TimeWindow;
     let arg = arg.map(str::to_lowercase);
     match arg.as_deref() {
-        None | Some("today" | "day" | "hari" | "hariini") => Some(TimeWindow::Day),
-        Some("week" | "minggu") => Some(TimeWindow::Week),
-        Some("month" | "bulan") => Some(TimeWindow::Month),
+        None | Some("today" | "day" | "hari" | "hariini" | "leo") => Some(TimeWindow::Day),
+        Some("week" | "minggu" | "wiki") => Some(TimeWindow::Week),
+        Some("month" | "bulan" | "mwezi") => Some(TimeWindow::Month),
         Some(_) => None,
     }
 }
@@ -142,6 +142,11 @@ pub fn link_code(language: &str, code: &str) -> String {
             "Kode Anda: {code}\n\nBuka Friday: Pengaturan, Integrasi, Guss, Tautkan Telegram, lalu \
              masukkan kode ini dalam 10 menit. Setelah itu peran Anda di Friday berlaku di sini."
         )
+    } else if is_sw(language) {
+        format!(
+            "Nambari yako: {code}\n\nFungua Friday: Mipangilio, Miunganisho, Guss, Unganisha Telegram, \
+             kisha uiweke ndani ya dakika 10. Baada ya hapo jukumu lako la Friday litatumika hapa."
+        )
     } else {
         format!(
             "Your code: {code}\n\nOpen Friday: Settings, Integrations, Guss, Link your Telegram, and \
@@ -153,6 +158,8 @@ pub fn link_code(language: &str, code: &str) -> String {
 pub fn link_unavailable(language: &str) -> String {
     if is_id(language) {
         "Guss ini belum terhubung ke Friday.".to_string()
+    } else if is_sw(language) {
+        "Guss hii haijaunganishwa na Friday.".to_string()
     } else {
         "This Guss isn't connected to Friday.".to_string()
     }
@@ -161,6 +168,9 @@ pub fn link_unavailable(language: &str) -> String {
 pub fn link_failed(language: &str) -> String {
     if is_id(language) {
         "Tidak bisa mengambil kode dari Friday sekarang. Coba lagi sebentar lagi.".to_string()
+    } else if is_sw(language) {
+        "Imeshindikana kupata nambari kutoka Friday sasa hivi. Jaribu tena baada ya dakika moja."
+            .to_string()
     } else {
         "Couldn't get a code from Friday right now. Try again in a minute.".to_string()
     }
@@ -173,6 +183,10 @@ pub fn link_first(language: &str, business: &str) -> String {
         format!(
             "Halo! Ini asisten toko {business}. Kirim /link untuk menautkan akun Friday Anda dulu."
         )
+    } else if is_sw(language) {
+        format!(
+            "Habari! Huyu ni msaidizi wa duka la {business}. Tuma /link kwanza kuunganisha akaunti yako ya Friday."
+        )
     } else {
         format!(
             "Hi! This is {business}'s shop assistant. Send /link to connect your Friday account first."
@@ -184,6 +198,9 @@ pub fn void_usage(language: &str) -> String {
     if is_id(language) {
         "Tulis nomor catatan dan alasannya, misalnya: /void 12 tercatat dua kali. Nomor ada di /history."
             .to_string()
+    } else if is_sw(language) {
+        "Andika nambari ya rekodi na sababu, kwa mfano: /void 12 imerekodiwa mara mbili. Nambari ziko kwenye /history."
+            .to_string()
     } else {
         "Give the entry number and why, e.g. /void 12 recorded twice. Numbers are in /history."
             .to_string()
@@ -193,6 +210,8 @@ pub fn void_usage(language: &str) -> String {
 pub fn decide_usage(language: &str) -> String {
     if is_id(language) {
         "Tulis nomor permintaan, misalnya /approve 3. Lihat /pending.".to_string()
+    } else if is_sw(language) {
+        "Andika nambari ya ombi, kwa mfano /approve 3. Angalia /pending.".to_string()
     } else {
         "Give the request number, e.g. /approve 3. See /pending.".to_string()
     }
@@ -202,10 +221,19 @@ fn is_id(language: &str) -> bool {
     language == "id"
 }
 
+fn is_sw(language: &str) -> bool {
+    language == "sw"
+}
+
 pub fn welcome(language: &str, business: &str, first_name: &str) -> String {
     if is_id(language) {
         format!(
             "Halo {first_name}! Saya asisten toko {business}.\n\n{}",
+            help(language)
+        )
+    } else if is_sw(language) {
+        format!(
+            "Habari {first_name}! Mimi ni msaidizi wa duka la {business}.\n\n{}",
             help(language)
         )
     } else {
@@ -227,6 +255,16 @@ pub fn help(language: &str) -> String {
          /history menampilkan catatan terakhir dengan nomornya. Catatan yang salah setelah 5 menit: \
          /void 12 alasannya. Tidak ada yang dihapus; pemilik atau manajer menyetujui."
             .to_string()
+    } else if is_sw(language) {
+        "Niambie tu kilichotokea, kama unavyomtumia mwenzako ujumbe:\n\
+         • nimeuza mchele mifuko 3 kwa 120\n\
+         • nimelipa 500 nauli\n\
+         • soda 20 zimeingia\n\n\
+         Nitathibitisha nilichorekodi. Kosa? Jibu \"hapana\" au /undo ndani ya dakika 5.\n\n\
+         /report inaonyesha mauzo ya leo (/report wiki, /report mwezi).\n\n\
+         /history inaonyesha rekodi za mwisho na nambari zake. Rekodi yenye kosa baada ya dakika 5: \
+         /void 12 sababu. Hakuna kinachofutwa kabisa; mwenye duka au meneja anaidhinisha."
+            .to_string()
     } else {
         "Just tell me what happened, the way you'd text a colleague:\n\
          • sold 3 bags of rice at 120\n\
@@ -247,6 +285,12 @@ pub fn private_bot(language: &str, business: &str, user_id: i64) -> String {
              ID Telegram Anda: {user_id}\n\
              Jika Anda bekerja di sini, kirim ID ini ke pemilik agar Anda ditambahkan."
         )
+    } else if is_sw(language) {
+        format!(
+            "Habari! Huyu ni msaidizi binafsi wa duka la {business}, kwa hiyo ni timu yake tu inayoweza kumtumia.\n\n\
+             Kitambulisho chako cha Telegram: {user_id}\n\
+             Kama unafanya kazi hapa, mtumie mwenye duka kitambulisho hiki akuongeze."
+        )
     } else {
         format!(
             "Hi! This is {business}'s private shop assistant, so only its team can use it.\n\n\
@@ -259,6 +303,8 @@ pub fn private_bot(language: &str, business: &str, user_id: i64) -> String {
 pub fn your_id(language: &str, user_id: i64) -> String {
     if is_id(language) {
         format!("ID Telegram Anda: {user_id}")
+    } else if is_sw(language) {
+        format!("Kitambulisho chako cha Telegram: {user_id}")
     } else {
         format!("Your Telegram ID: {user_id}")
     }
@@ -267,6 +313,8 @@ pub fn your_id(language: &str, user_id: i64) -> String {
 pub fn private_chats_only(language: &str) -> String {
     if is_id(language) {
         "Saya hanya bekerja di chat pribadi. Kirim pesan langsung ke saya.".to_string()
+    } else if is_sw(language) {
+        "Nafanya kazi kwenye mazungumzo ya faragha tu. Nitumie ujumbe moja kwa moja.".to_string()
     } else {
         "I only work in a private chat. Message me directly.".to_string()
     }
@@ -275,6 +323,8 @@ pub fn private_chats_only(language: &str) -> String {
 pub fn unknown_command(language: &str) -> String {
     if is_id(language) {
         "Perintah itu tidak saya kenal. Coba /help.".to_string()
+    } else if is_sw(language) {
+        "Sijui amri hiyo. Jaribu /help.".to_string()
     } else {
         "I don't know that command. Try /help.".to_string()
     }
@@ -283,6 +333,8 @@ pub fn unknown_command(language: &str) -> String {
 pub fn bad_report_window(language: &str) -> String {
     if is_id(language) {
         "Pakai /report, /report minggu, atau /report bulan.".to_string()
+    } else if is_sw(language) {
+        "Tumia /report, /report wiki, au /report mwezi.".to_string()
     } else {
         "Use /report, /report week or /report month.".to_string()
     }
@@ -294,6 +346,12 @@ fn description(language: &str, business: &str) -> String {
             "Asisten toko {business}. Ceritakan apa yang terjadi dengan kata-kata biasa, \
              misalnya \"terjual 3 karung beras @120\" atau \"bayar 500 untuk transport\", \
              dan saya mencatat pembukuannya. Minta /report kapan saja. Hanya tim toko yang bisa memakai saya."
+        )
+    } else if is_sw(language) {
+        format!(
+            "Msaidizi wa duka la {business}. Niambie kilichotokea kwa maneno ya kawaida, \
+             kama \"nimeuza mchele mifuko 3 kwa 120\" au \"nimelipa 500 nauli\", \
+             nami ninatunza vitabu. Omba /report wakati wowote. Ni timu ya duka tu inayoweza kunitumia."
         )
     } else {
         format!(
@@ -307,6 +365,8 @@ fn description(language: &str, business: &str) -> String {
 fn short_description(language: &str, business: &str) -> String {
     let s = if is_id(language) {
         format!("Asisten toko {business}: catat penjualan, stok, dan pengeluaran lewat chat.")
+    } else if is_sw(language) {
+        format!("Msaidizi wa duka la {business}: rekodi mauzo, stoki na matumizi kwa ujumbe.")
     } else {
         format!("{business}'s shop assistant: record sales, stock and expenses by chat.")
     };
@@ -314,8 +374,25 @@ fn short_description(language: &str, business: &str) -> String {
 }
 
 fn commands(language: &str) -> Vec<BotCommand> {
-    let c =
-        |cmd: &str, en: &str, id: &str| BotCommand::new(cmd, if is_id(language) { id } else { en });
+    let sw_of = |cmd: &str| match cmd {
+        "report" => "Ripoti ya mauzo: leo, wiki au mwezi",
+        "undo" => "Tendua rekodi ya mwisho",
+        "history" => "Rekodi za mwisho na nambari zake",
+        "void" => "Futa rekodi: /void 12 sababu",
+        "pending" => "Maombi ya kufuta ya kuidhinisha",
+        "help" => "Jinsi ya kunitumia",
+        _ => "Onyesha kitambulisho chako cha Telegram",
+    };
+    let c = |cmd: &str, en: &str, id: &str| {
+        let text = if is_id(language) {
+            id
+        } else if is_sw(language) {
+            sw_of(cmd)
+        } else {
+            en
+        };
+        BotCommand::new(cmd, text)
+    };
     vec![
         c(
             "report",
@@ -357,7 +434,12 @@ fn commands(language: &str) -> Vec<BotCommand> {
 /// are logged, never fatal: the bot works without its profile.
 pub async fn apply_profile(bot: &Bot, business: &str, business_language: &str) {
     let mut ok = true;
-    for (lang, code) in [(business_language, ""), ("en", "en"), ("id", "id")] {
+    for (lang, code) in [
+        (business_language, ""),
+        ("en", "en"),
+        ("id", "id"),
+        ("sw", "sw"),
+    ] {
         let mut desc = bot
             .set_my_description()
             .description(description(lang, business));
@@ -454,12 +536,14 @@ mod tests {
 
     #[test]
     fn texts_are_bilingual_and_fit_limits() {
-        for lang in ["en", "id"] {
+        for lang in ["en", "id", "sw"] {
             assert!(description(lang, "Demo Shop").chars().count() <= 512);
             assert!(short_description(lang, &"x".repeat(200)).chars().count() <= 120);
             assert!(welcome(lang, "Demo Shop", "Ann").contains("Demo Shop"));
             assert!(private_bot(lang, "Demo Shop", 42).contains("42"));
         }
         assert_ne!(help("en"), help("id"));
+        assert_ne!(help("en"), help("sw"));
+        assert!(report_window(Some("wiki")).is_some());
     }
 }

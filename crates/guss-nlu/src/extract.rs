@@ -204,15 +204,24 @@ impl Issue {
                 );
                 if lang == "id" {
                     format!("{what}: {q} x {e} = {t}, bukan {s}. Mana yang benar?")
+                } else if lang == "sw" {
+                    format!("{what}: {q} x {e} = {t}, si {s}. Kipi ni sahihi?")
                 } else {
                     format!("{what}: {q} x {e} = {t}, not {s}. Which is right?")
                 }
             }
             (Issue::MissingAmount { what }, "id") => format!("{what}: berapa harganya?"),
+            (Issue::MissingAmount { what }, "sw") => format!("{what}: ilikuwa bei gani?"),
             (Issue::MissingAmount { what }, _) => format!("{what}: how much was it?"),
             (Issue::NotPositive { what, value }, "id") => {
                 format!(
                     "{what}: {} tidak mungkin, harus lebih dari 0.",
+                    fmt_num(*value)
+                )
+            }
+            (Issue::NotPositive { what, value }, "sw") => {
+                format!(
+                    "{what}: {} haiwezekani, lazima iwe zaidi ya 0.",
                     fmt_num(*value)
                 )
             }

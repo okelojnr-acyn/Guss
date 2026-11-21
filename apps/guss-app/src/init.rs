@@ -21,7 +21,11 @@ pub fn run_wizard(mut input: impl BufRead, mut output: impl Write) -> std::io::R
         &mut input,
         &mut output,
         "Language",
-        &[("en", "English"), ("id", "Bahasa Indonesia")],
+        &[
+            ("en", "English"),
+            ("id", "Bahasa Indonesia"),
+            ("sw", "Kiswahili"),
+        ],
         "en",
     )?;
     let timezone = ask(

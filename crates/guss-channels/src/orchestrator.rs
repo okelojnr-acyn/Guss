@@ -25,10 +25,10 @@ use uuid::Uuid;
 /// docs/ARCHITECTURE.md.
 const UNDO_WINDOW: Duration = Duration::minutes(5);
 
-const UNDO_WORDS: &[&str] = &["no", "undo", "tidak", "batal"];
+const UNDO_WORDS: &[&str] = &["no", "undo", "tidak", "batal", "hapana"];
 
 /// Replies that keep an amount in the other currency it was given in.
-const KEEP_WORDS: &[&str] = &["keep", "yes", "ya", "simpan"];
+const KEEP_WORDS: &[&str] = &["keep", "yes", "ya", "simpan", "ndiyo", "ndio", "sawa"];
 
 /// How long a "that's in USD, not your usual KES" question stays open.
 /// After this the held entries are dropped (nothing was saved).
@@ -136,58 +136,63 @@ impl OrchestratorError {
     /// nothing was saved, and what to do about it. The details stay in the
     /// logs (and Friday Host shows them on the machine).
     pub fn user_message(&self, language: &str) -> String {
-        let id = language == "id";
+        let t = |en, id, sw| texts::pick(language, en, id, sw);
         let ai = |msg: &str| -> &'static str {
             let m = msg.to_lowercase();
             if m.contains("401") || m.contains("invalid_api_key") || m.contains("invalid api key") {
-                if id {
-                    "Penyedia AI menolak kunci Guss. Pemilik perlu memeriksanya di pengaturan Guss."
-                } else {
-                    "The AI provider refused Guss's key. The owner needs to check it in Guss's settings."
-                }
+                t(
+                    "The AI provider refused Guss's key. The owner needs to check it in Guss's settings.",
+                    "Penyedia AI menolak kunci Guss. Pemilik perlu memeriksanya di pengaturan Guss.",
+                    "Mtoa huduma wa AI amekataa ufunguo wa Guss. Mwenye duka anahitaji kuukagua kwenye mipangilio ya Guss.",
+                )
             } else if m.contains("429") || m.contains("rate limit") || m.contains("rate_limit") {
-                if id {
-                    "Penyedia AI sedang sibuk (batas pemakaian). Coba lagi sebentar lagi."
-                } else {
-                    "The AI provider is busy (usage limit reached). Try again in a minute."
-                }
+                t(
+                    "The AI provider is busy (usage limit reached). Try again in a minute.",
+                    "Penyedia AI sedang sibuk (batas pemakaian). Coba lagi sebentar lagi.",
+                    "Mtoa huduma wa AI ana shughuli nyingi (kikomo cha matumizi). Jaribu tena baada ya dakika moja.",
+                )
             } else if m.contains("404")
                 || m.contains("model_not_found")
                 || m.contains("decommissioned")
             {
-                if id {
-                    "Model AI yang dipilih tidak tersedia lagi. Pemilik perlu memilih model lain di pengaturan Guss."
-                } else {
-                    "The chosen AI model isn't available any more. The owner needs to pick another in Guss's settings."
-                }
-            } else if id {
-                "Tidak bisa menghubungi penyedia AI. Coba lagi sebentar lagi."
+                t(
+                    "The chosen AI model isn't available any more. The owner needs to pick another in Guss's settings.",
+                    "Model AI yang dipilih tidak tersedia lagi. Pemilik perlu memilih model lain di pengaturan Guss.",
+                    "Modeli ya AI iliyochaguliwa haipatikani tena. Mwenye duka anahitaji kuchagua nyingine kwenye mipangilio ya Guss.",
+                )
             } else {
-                "Couldn't reach the AI provider. Try again in a minute."
+                t(
+                    "Couldn't reach the AI provider. Try again in a minute.",
+                    "Tidak bisa menghubungi penyedia AI. Coba lagi sebentar lagi.",
+                    "Imeshindikana kumfikia mtoa huduma wa AI. Jaribu tena baada ya dakika moja.",
+                )
             }
         };
         let why: String = match self {
             OrchestratorError::Nlu(NluError::Llm(guss_llm::LlmError::Request(msg))) => ai(msg).into(),
             OrchestratorError::Nlu(NluError::Llm(_)) => ai("").into(),
-            OrchestratorError::Nlu(NluError::Unparseable { .. }) => if id {
-                "Saya tidak bisa memahami pesan itu. Coba katakan dengan cara lain, misalnya \"jual 3 beras 12000\"."
-            } else {
-                "I couldn't make sense of that one. Try saying it another way, e.g. \"sold 3 rice at 120\"."
-            }
+            OrchestratorError::Nlu(NluError::Unparseable { .. }) => t(
+                "I couldn't make sense of that one. Try saying it another way, e.g. \"sold 3 rice at 120\".",
+                "Saya tidak bisa memahami pesan itu. Coba katakan dengan cara lain, misalnya \"jual 3 beras 12000\".",
+                "Sikuelewa ujumbe huo. Jaribu kusema kwa njia nyingine, kwa mfano \"nimeuza mchele 3 kwa 120\".",
+            )
             .into(),
-            OrchestratorError::Store(_) => if id {
-                "Tidak bisa membuka pembukuan. Coba lagi sebentar lagi."
-            } else {
-                "Couldn't open the books. Try again in a minute."
-            }
+            OrchestratorError::Store(_) => t(
+                "Couldn't open the books. Try again in a minute.",
+                "Tidak bisa membuka pembukuan. Coba lagi sebentar lagi.",
+                "Imeshindikana kufungua vitabu. Jaribu tena baada ya dakika moja.",
+            )
             .into(),
             OrchestratorError::VoiceNotConfigured(why) => why.clone(),
         };
-        if id {
-            format!("{why}\nTidak ada yang disimpan.")
-        } else {
-            format!("{why}\nNothing was saved.")
-        }
+        format!(
+            "{why}\n{}",
+            t(
+                "Nothing was saved.",
+                "Tidak ada yang disimpan.",
+                "Hakuna kilichohifadhiwa."
+            )
+        )
     }
 }
 
@@ -1006,12 +1011,15 @@ fn source_channel_tag(channel: SourceChannel) -> &'static str {
 fn paid_label(paid_by: Option<&str>, language: &str) -> String {
     let name = match (paid_by, language) {
         (Some("cash"), "id") => "tunai",
+        (Some("cash"), "sw") => "pesa taslimu",
         (Some("cash"), _) => "cash",
         (Some("mpesa"), _) => "M-Pesa",
         (Some("airtel"), _) => "Airtel Money",
         (Some("card"), "id") => "kartu",
+        (Some("card"), "sw") => "kadi",
         (Some("card"), _) => "card",
         (Some("bank"), "id") => "transfer",
+        (Some("bank"), "sw") => "benki",
         (Some("bank"), _) => "bank",
         _ => return String::new(),
     };
@@ -1022,6 +1030,7 @@ fn paid_label(paid_by: Option<&str>, language: &str) -> String {
 fn credit_label(s: &Sale, language: &str) -> String {
     match (s.credit_to.as_deref(), language) {
         (Some(who), "id") => format!(" (utang: {who})"),
+        (Some(who), "sw") => format!(" (deni: {who})"),
         (Some(who), _) => format!(" (credit: {who})"),
         _ => String::new(),
     }
@@ -1037,6 +1046,7 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
                     s.unit_price,
                     s.total()
                 ),
+                "sw" => format!("Imerudishwa: {what} kwa {} = {}", s.unit_price, s.total()),
                 _ => format!("Returned: {what} at {} = {}", s.unit_price, s.total()),
             }
         }
@@ -1044,6 +1054,7 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
             let how = paid_label(d.paid_by.as_deref(), language);
             match language {
                 "id" => format!("Bayar utang: {} {}{how}", d.customer, d.amount),
+                "sw" => format!("Deni limelipwa: {} {}{how}", d.customer, d.amount),
                 _ => format!("Debt paid: {} {}{how}", d.customer, d.amount),
             }
         }
@@ -1053,6 +1064,13 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
             match language {
                 "id" => format!(
                     "Terjual: {what} seharga {} = {}{}{}",
+                    s.unit_price,
+                    total,
+                    paid_label(s.paid_by.as_deref(), language),
+                    credit_label(s, language)
+                ),
+                "sw" => format!(
+                    "Imeuzwa: {what} kwa {} = {}{}{}",
                     s.unit_price,
                     total,
                     paid_label(s.paid_by.as_deref(), language),
@@ -1069,6 +1087,7 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
         }
         BusinessEvent::Expense(e) => match language {
             "id" => format!("Pengeluaran: {} sebesar {}", e.description, e.amount),
+            "sw" => format!("Matumizi: {} kiasi {}", e.description, e.amount),
             _ => format!("Expense: {} for {}", e.description, e.amount),
         },
         BusinessEvent::StockUpdate(su) => match (&su.unit_cost, language) {
@@ -1082,6 +1101,11 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
                         "Stok {}: {:+} @ {} = {} dibayar",
                         su.item_name, su.delta, cost, paid
                     )
+                } else if lang == "sw" {
+                    format!(
+                        "Stoki {}: {:+} kwa {} = {} imelipwa",
+                        su.item_name, su.delta, cost, paid
+                    )
                 } else {
                     format!(
                         "Stock {}: {:+} at {} = {} paid",
@@ -1090,10 +1114,12 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
                 }
             }
             (_, "id") => format!("Stok {}: {:+}", su.item_name, su.delta),
+            (_, "sw") => format!("Stoki {}: {:+}", su.item_name, su.delta),
             _ => format!("Stock {}: {:+}", su.item_name, su.delta),
         },
         BusinessEvent::Note(n) => match language {
             "id" => format!("Catatan (tidak dihitung): {}", n.text),
+            "sw" => format!("Dokezo (halihesabiwi): {}", n.text),
             _ => format!("Note (not counted): {}", n.text),
         },
     }
@@ -1154,6 +1180,7 @@ fn quantity_text(quantity: f64, unit: Option<&str>, factor: f64, item: &str) -> 
 fn unit_dropped_note(item: &str, language: &str) -> String {
     match language {
         "id" => format!("(Catatan {item} sebelumnya tidak disimpan.)"),
+        "sw" => format!("(Rekodi ya {item} ya awali haikuhifadhiwa.)"),
         _ => format!("(The earlier {item} entry was not saved.)"),
     }
 }
@@ -1163,6 +1190,7 @@ fn issues_reply(issues: &[guss_nlu::Issue], language: &str) -> String {
     let body = lines.join("\n");
     match language {
         "id" => format!("{body}\n\nBelum ada yang disimpan. Kirim lagi dengan angka yang benar."),
+        "sw" => format!("{body}\n\nHakuna kilichohifadhiwa. Tuma tena na namba sahihi."),
         _ => format!("{body}\n\nNothing was saved. Send it again with the right numbers."),
     }
 }
@@ -1175,6 +1203,11 @@ fn notes_only_hint(language: &str) -> &'static str {
             "Ini hanya disimpan sebagai catatan, tidak masuk penjualan atau pengeluaran. \
              Kalau ini penjualan atau pembelian, kirim lagi, misalnya \"jual 3 beras 12000\" \
              atau \"beli 30 kaos 65rb per biji\"."
+        }
+        "sw" => {
+            "Imehifadhiwa kama dokezo tu, haihesabiwi kwenye mauzo wala matumizi. Kama ni mauzo \
+             au ununuzi, tuma tena, kwa mfano \"nimeuza mchele 3 kwa 120\" au \"nimenunua \
+             tshirt 30 kwa 650 kila moja\"."
         }
         _ => {
             "Saved only as a note, not counted in sales or expenses. If it was a sale or a \
@@ -1286,6 +1319,10 @@ fn currency_question(foreign: &[String], home: &str, language: &str) -> String {
             "Itu dalam {list}, bukan {home} seperti biasanya. Belum ada yang disimpan.\n\
              Balas \"{keep}\" untuk tetap memakai {list}, atau \"{home_word}\" jika maksudnya {home}."
         ),
+        "sw" => format!(
+            "Hiyo ni kwa {list}, si {home} ya kawaida. Bado hakuna kilichohifadhiwa.\n\
+             Jibu \"{keep}\" kubaki na {list}, au \"{home_word}\" kama ilikuwa {home}."
+        ),
         _ => format!(
             "That's in {list}, not your usual {home}. Nothing is saved yet.\n\
              Reply \"{keep}\" to keep it in {list}, or \"{home_word}\" if it was {home}."
@@ -1296,6 +1333,7 @@ fn currency_question(foreign: &[String], home: &str, language: &str) -> String {
 fn currency_cancelled_reply(language: &str) -> String {
     match language {
         "id" => "Dibatalkan, tidak ada yang disimpan.".to_string(),
+        "sw" => "Imesitishwa, hakuna kilichohifadhiwa.".to_string(),
         _ => "Cancelled, nothing was saved.".to_string(),
     }
 }
@@ -1304,6 +1342,7 @@ fn currency_dropped_note(foreign: &[String], language: &str) -> String {
     let list = foreign.join(" / ");
     match language {
         "id" => format!("(Catatan dalam {list} sebelumnya tidak disimpan.)"),
+        "sw" => format!("(Rekodi ya awali kwa {list} haikuhifadhiwa.)"),
         _ => format!("(The earlier {list} entry was not saved.)"),
     }
 }
@@ -1577,6 +1616,19 @@ mod tests {
         o.handle_message("chat", SourceChannel::Telegram, text)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_swahili_shop_gets_swahili_replies() {
+        let o = orchestrator(kes_sale(), "sw", OtherCurrencyPolicy::Ask).await;
+        let reply = say(&o, "nimeuza mchele 3 kwa 120").await;
+        assert!(
+            reply.starts_with("Imeuzwa: 3 rice kwa 120.00 KES"),
+            "{reply}"
+        );
+        // "hapana" undoes, like "no".
+        let undone = say(&o, "hapana").await;
+        assert!(saved_sales(&o).await.is_empty(), "{undone}");
     }
 
     #[tokio::test]
