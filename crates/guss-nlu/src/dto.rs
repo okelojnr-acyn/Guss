@@ -27,6 +27,9 @@ pub enum ExtractedEvent {
         /// ISO 4217 code, e.g. "USD". Null to use the business's default currency.
         currency: Option<String>,
         category: Option<String>,
+        /// How the customer paid, only when said ("paid by M-Pesa", "kwa mpesa", "pakai kartu"). Null if not said.
+        #[serde(default)]
+        paid_by: Option<PaidBy>,
     },
     /// Money paid out for anything that is NOT stock bought to resell:
     /// rent, transport, fees, wages, subscriptions, and things for the
@@ -58,6 +61,31 @@ pub enum ExtractedEvent {
     /// Business information that is not money or stock ("slow day
     /// today"). Never used for greetings, thanks or questions.
     Note { text: String },
+}
+
+/// How a customer paid for a sale.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaidBy {
+    Cash,
+    Mpesa,
+    Airtel,
+    Card,
+    Bank,
+}
+
+impl PaidBy {
+    /// The method name Friday's books use (cash 1010, M-Pesa/Airtel 1020,
+    /// card/bank 1030).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaidBy::Cash => "cash",
+            PaidBy::Mpesa => "mpesa",
+            PaidBy::Airtel => "airtel",
+            PaidBy::Card => "card",
+            PaidBy::Bank => "bank",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

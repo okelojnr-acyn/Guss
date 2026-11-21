@@ -916,14 +916,40 @@ fn source_channel_tag(channel: SourceChannel) -> &'static str {
     }
 }
 
+/// " (M-Pesa)" after a sale whose payment was said; nothing otherwise.
+fn paid_label(s: &Sale, language: &str) -> String {
+    let name = match (s.paid_by.as_deref(), language) {
+        (Some("cash"), "id") => "tunai",
+        (Some("cash"), _) => "cash",
+        (Some("mpesa"), _) => "M-Pesa",
+        (Some("airtel"), _) => "Airtel Money",
+        (Some("card"), "id") => "kartu",
+        (Some("card"), _) => "card",
+        (Some("bank"), "id") => "transfer",
+        (Some("bank"), _) => "bank",
+        _ => return String::new(),
+    };
+    format!(" ({name})")
+}
+
 fn describe_event(event: &BusinessEvent, language: &str) -> String {
     match event {
         BusinessEvent::Sale(s) => {
             let total = s.total();
             let what = quantity_text(s.quantity, s.unit.as_deref(), s.unit_factor, &s.item_name);
             match language {
-                "id" => format!("Terjual: {what} seharga {} = {}", s.unit_price, total),
-                _ => format!("Sold: {what} at {} = {}", s.unit_price, total),
+                "id" => format!(
+                    "Terjual: {what} seharga {} = {}{}",
+                    s.unit_price,
+                    total,
+                    paid_label(s, language)
+                ),
+                _ => format!(
+                    "Sold: {what} at {} = {}{}",
+                    s.unit_price,
+                    total,
+                    paid_label(s, language)
+                ),
             }
         }
         BusinessEvent::Expense(e) => match language {

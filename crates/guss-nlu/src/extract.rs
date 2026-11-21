@@ -277,6 +277,7 @@ fn to_business_event(
             total_major,
             currency,
             category,
+            paid_by,
         } => {
             if quantity <= 0.0 {
                 return Err(Issue::NotPositive {
@@ -305,6 +306,7 @@ fn to_business_event(
                 occurred_at: now,
                 recurring: None,
                 source_channel,
+                paid_by: paid_by.map(|m| m.as_str().to_string()),
                 raw_text: Some(raw_text.to_string()),
             })
         }
@@ -493,6 +495,24 @@ mod tests {
             [BusinessEvent::Sale(s)] => s,
             other => panic!("expected one sale, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn how_the_customer_paid_is_kept_only_when_said() {
+        let mut said = sale_json(Some(60.0), None, 2.0);
+        said["events"][0]["paid_by"] = json!("mpesa");
+        assert_eq!(
+            only_sale(&checked(said).await).paid_by.as_deref(),
+            Some("mpesa")
+        );
+        // Older replies without the field, and an explicit null: not said.
+        assert_eq!(
+            only_sale(&checked(sale_json(Some(60.0), None, 2.0)).await).paid_by,
+            None
+        );
+        let mut null = sale_json(Some(60.0), None, 2.0);
+        null["events"][0]["paid_by"] = Value::Null;
+        assert_eq!(only_sale(&checked(null).await).paid_by, None);
     }
 
     #[tokio::test]

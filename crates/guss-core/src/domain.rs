@@ -62,6 +62,10 @@ pub struct Sale {
     pub occurred_at: DateTime<Utc>,
     pub recurring: Option<RecurrenceInfo>,
     pub source_channel: SourceChannel,
+    /// How the customer paid, when it was said: "cash", "mpesa",
+    /// "airtel", "card" or "bank". None = not said (Friday books cash).
+    #[serde(default)]
+    pub paid_by: Option<String>,
     /// Original utterance this was extracted from, kept for audit/debug.
     pub raw_text: Option<String>,
 }
@@ -235,6 +239,7 @@ mod tests {
             occurred_at: Utc::now(),
             recurring: None,
             source_channel: SourceChannel::Cli,
+            paid_by: None,
             raw_text: None,
         }
     }

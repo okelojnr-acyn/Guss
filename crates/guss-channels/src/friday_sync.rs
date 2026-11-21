@@ -359,8 +359,8 @@ async fn push_sale(
                 "client_sale_id": reference,
                 "channel": "guss",
                 "currency": total.currency,
-                // Guss doesn't ask how the customer paid yet.
-                "method": "cash",
+                // As said ("paid by mpesa"); unsaid counts as cash.
+                "method": s.paid_by.as_deref().unwrap_or("cash"),
                 "amount_cents": total.amount.minor_units,
                 "created_at_ms": s.occurred_at.timestamp_millis(),
                 "lines": [line],
@@ -484,6 +484,7 @@ mod tests {
             occurred_at: Utc::now(),
             recurring: None,
             source_channel: SourceChannel::Telegram,
+            paid_by: None,
             raw_text: None,
         })
     }
@@ -810,6 +811,7 @@ mod tests {
             s.unit = Some("crate".into());
             s.unit_factor = 24.0;
             s.unit_price = CurrencyAmount::new(1200.0, "KES");
+            s.paid_by = Some("mpesa".into());
         }
         store.save_event_by(&crates, Some(&mary)).await.unwrap();
         let reference = format!("guss:{}", crates.id());
@@ -829,6 +831,8 @@ mod tests {
                 "client_sale_id": reference,
                 "channel": "guss",
                 "currency": "KES",
+                // Said "paid by mpesa": Friday books it to M-Pesa, not cash.
+                "method": "mpesa",
                 "amount_cents": 240000,
                 "lines": [{
                     "description": "Sodas", "quantity": 2.0, "unit_price_cents": 120000,
