@@ -146,17 +146,17 @@ pub fn link_code(language: &str, code: &str) -> String {
     if is_id(language) {
         format!(
             "Kode Anda: {code}\n\nBuka Friday: Aplikasi & integrasi, Guss, Tautkan Telegram, lalu \
-             masukkan kode ini dalam 10 menit. Setelah itu peran Anda di Friday berlaku di sini."
+             masukkan kode ini dalam 30 menit. Setelah itu peran Anda di Friday berlaku di sini."
         )
     } else if is_sw(language) {
         format!(
             "Nambari yako: {code}\n\nFungua Friday: Programu na miunganisho, Guss, Unganisha Telegram, \
-             kisha uiweke ndani ya dakika 10. Baada ya hapo jukumu lako la Friday litatumika hapa."
+             kisha uiweke ndani ya dakika 30. Baada ya hapo jukumu lako la Friday litatumika hapa."
         )
     } else {
         format!(
             "Your code: {code}\n\nOpen Friday: Apps & integrations, Guss, Link your Telegram, and \
-             enter it within 10 minutes. After that your Friday role applies here."
+             enter it within 30 minutes. After that your Friday role applies here."
         )
     }
 }

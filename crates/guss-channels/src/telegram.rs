@@ -279,6 +279,7 @@ where
             None => telegram_ux::link_unavailable(&language),
             Some(f) => match f.link_code(user_id, &user.first_name).await {
                 Ok(code) => {
+                    tracing::info!(user_id, "link code sent");
                     f.refresh().await;
                     telegram_ux::link_code(&language, &code)
                 }
