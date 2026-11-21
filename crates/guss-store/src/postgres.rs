@@ -220,6 +220,21 @@ impl Store for PostgresStore {
         Ok(())
     }
 
+    async fn resend(&self, business_id: Uuid, number: i64) -> Result<bool, StoreError> {
+        let done = sqlx::query(
+            "UPDATE events SET sync_error = NULL, \
+             synced_at = CASE WHEN synced_at = 'skipped' THEN NULL ELSE synced_at END, \
+             void_synced_at = CASE WHEN void_synced_at = 'skipped' THEN NULL ELSE void_synced_at END \
+             WHERE business_id = $1 AND seq = $2 AND (synced_at = 'skipped' OR void_synced_at = 'skipped')",
+        )
+        .bind(business_id.to_string())
+        .bind(number)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(done.rows_affected() > 0)
+    }
+
     async fn mark_sync_failed(
         &self,
         id: Uuid,
