@@ -184,7 +184,8 @@ pub fn compute_report(
                     entry.1 += su.base_delta();
                 }
             }
-            BusinessEvent::Note(_) => {}
+            // Money for earlier credit sales, already counted when sold.
+            BusinessEvent::Note(_) | BusinessEvent::DebtPayment(_) => {}
         }
     }
 
@@ -340,6 +341,8 @@ mod tests {
             recurring: None,
             source_channel: SourceChannel::Cli,
             paid_by: None,
+            credit_to: None,
+            returns: None,
             raw_text: None,
         })
     }

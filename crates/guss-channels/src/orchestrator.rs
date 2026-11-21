@@ -423,6 +423,9 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         home: &str,
     ) -> Result<String, OrchestratorError> {
         let language = self.business.language.as_str();
+        if let Some(reply) = self.price_returns(&mut events, language).await? {
+            return Ok(reply);
+        }
         let catalog = self.catalog().await?;
         if let Some(q) = items::resolve(&mut events, &catalog) {
             let reply = items::unit_question_text(&q, language);
@@ -496,6 +499,9 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             let BusinessEvent::Sale(s) = event else {
                 continue;
             };
+            if s.quantity < 0.0 {
+                continue; // a return carries the sale's own price
+            }
             let per_base = |sale: &Sale| sale.unit_price.major_units() / sale.unit_factor.max(1e-9);
             let mut usual: Vec<f64> = history
                 .iter()
@@ -527,6 +533,61 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     language,
                 )));
             }
+        }
+        Ok(None)
+    }
+
+    /// A return ("returned 1 rice") gives back the latest sale of that
+    /// item: its price, unit and id come from there. Some(reply) when
+    /// it can't (no such sale, or it was sold on credit: Friday only takes
+    /// those back whole), and nothing is saved.
+    async fn price_returns(
+        &self,
+        events: &mut [BusinessEvent],
+        language: &str,
+    ) -> Result<Option<String>, OrchestratorError> {
+        if !events
+            .iter()
+            .any(|e| matches!(e, BusinessEvent::Sale(s) if s.quantity < 0.0 && s.returns.is_none()))
+        {
+            return Ok(None);
+        }
+        let history = self.store.journal(self.business.id, 500).await?;
+        for event in events.iter_mut() {
+            let BusinessEvent::Sale(r) = event else {
+                continue;
+            };
+            if r.quantity >= 0.0 || r.returns.is_some() {
+                continue;
+            }
+            let found = history.iter().find_map(|e| match &e.event {
+                BusinessEvent::Sale(s)
+                    if e.voided.is_none()
+                        && s.quantity > 0.0
+                        && items::normalize_name(&s.item_name)
+                            == items::normalize_name(&r.item_name) =>
+                {
+                    Some(s.clone())
+                }
+                _ => None,
+            });
+            let Some(sale) = found else {
+                return Ok(Some(texts::nothing_to_return(&r.item_name, language)));
+            };
+            if let Some(who) = &sale.credit_to {
+                return Ok(Some(texts::return_of_credit_sale(
+                    &sale.item_name,
+                    who,
+                    language,
+                )));
+            }
+            r.item_name = sale.item_name.clone();
+            r.unit_price = sale.unit_price.clone();
+            if r.unit.is_none() {
+                r.unit = sale.unit.clone();
+                r.unit_factor = sale.unit_factor;
+            }
+            r.returns = Some(sale.id);
         }
         Ok(None)
     }
@@ -645,6 +706,31 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     catalog.find(item_name).is_some(),
                     language,
                 ))
+            }
+            BooksQuestion::Owed { customer } => {
+                let events = self
+                    .store
+                    .list_events_since(self.business.id, DateTime::<Utc>::UNIX_EPOCH)
+                    .await?;
+                let owed = owed_by_customer(&events);
+                match customer.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                    Some(who) => {
+                        let key = who.to_lowercase();
+                        let found = owed.iter().find(|(name, _)| name.to_lowercase() == key);
+                        Ok(texts::owed_one(
+                            found.map(|(n, _)| n.as_str()).unwrap_or(who),
+                            found.map(|(_, a)| a.to_string()),
+                            language,
+                        ))
+                    }
+                    None => Ok(texts::owed_all(
+                        &owed
+                            .iter()
+                            .map(|(n, a)| (n.clone(), a.to_string()))
+                            .collect::<Vec<_>>(),
+                        language,
+                    )),
+                }
             }
             BooksQuestion::Totals { period, about } => {
                 let window = match period.trim().to_lowercase().as_str() {
@@ -917,8 +1003,8 @@ fn source_channel_tag(channel: SourceChannel) -> &'static str {
 }
 
 /// " (M-Pesa)" after a sale whose payment was said; nothing otherwise.
-fn paid_label(s: &Sale, language: &str) -> String {
-    let name = match (s.paid_by.as_deref(), language) {
+fn paid_label(paid_by: Option<&str>, language: &str) -> String {
+    let name = match (paid_by, language) {
         (Some("cash"), "id") => "tunai",
         (Some("cash"), _) => "cash",
         (Some("mpesa"), _) => "M-Pesa",
@@ -932,23 +1018,52 @@ fn paid_label(s: &Sale, language: &str) -> String {
     format!(" ({name})")
 }
 
+/// " (credit: John)" after a sale made on credit.
+fn credit_label(s: &Sale, language: &str) -> String {
+    match (s.credit_to.as_deref(), language) {
+        (Some(who), "id") => format!(" (utang: {who})"),
+        (Some(who), _) => format!(" (credit: {who})"),
+        _ => String::new(),
+    }
+}
+
 fn describe_event(event: &BusinessEvent, language: &str) -> String {
     match event {
+        BusinessEvent::Sale(s) if s.quantity < 0.0 => {
+            let what = quantity_text(-s.quantity, s.unit.as_deref(), s.unit_factor, &s.item_name);
+            match language {
+                "id" => format!(
+                    "Dikembalikan: {what} seharga {} = {}",
+                    s.unit_price,
+                    s.total()
+                ),
+                _ => format!("Returned: {what} at {} = {}", s.unit_price, s.total()),
+            }
+        }
+        BusinessEvent::DebtPayment(d) => {
+            let how = paid_label(d.paid_by.as_deref(), language);
+            match language {
+                "id" => format!("Bayar utang: {} {}{how}", d.customer, d.amount),
+                _ => format!("Debt paid: {} {}{how}", d.customer, d.amount),
+            }
+        }
         BusinessEvent::Sale(s) => {
             let total = s.total();
             let what = quantity_text(s.quantity, s.unit.as_deref(), s.unit_factor, &s.item_name);
             match language {
                 "id" => format!(
-                    "Terjual: {what} seharga {} = {}{}",
+                    "Terjual: {what} seharga {} = {}{}{}",
                     s.unit_price,
                     total,
-                    paid_label(s, language)
+                    paid_label(s.paid_by.as_deref(), language),
+                    credit_label(s, language)
                 ),
                 _ => format!(
-                    "Sold: {what} at {} = {}{}",
+                    "Sold: {what} at {} = {}{}{}",
                     s.unit_price,
                     total,
-                    paid_label(s, language)
+                    paid_label(s.paid_by.as_deref(), language),
+                    credit_label(s, language)
                 ),
             }
         }
@@ -982,6 +1097,46 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
             _ => format!("Note (not counted): {}", n.text),
         },
     }
+}
+
+/// What each customer still owes: credit sales minus what they paid,
+/// largest first, in the business's currency per customer as recorded.
+/// A credit sale taken back is voided, so it no longer counts.
+fn owed_by_customer(events: &[BusinessEvent]) -> Vec<(String, CurrencyAmount)> {
+    let mut owed: Vec<(String, String, i64)> = Vec::new(); // name, currency, minor
+    let mut add = |who: &str, ccy: &str, minor: i64| {
+        let key = who.trim().to_lowercase();
+        match owed
+            .iter_mut()
+            .find(|(n, c, _)| n.to_lowercase() == key && c == ccy)
+        {
+            Some(row) => row.2 += minor,
+            None => owed.push((who.trim().to_string(), ccy.to_string(), minor)),
+        }
+    };
+    for e in events {
+        match e {
+            BusinessEvent::Sale(s) if s.quantity > 0.0 => {
+                if let Some(who) = &s.credit_to {
+                    let t = s.total();
+                    add(who, &t.currency, t.amount.minor_units);
+                }
+            }
+            BusinessEvent::DebtPayment(d) => add(
+                &d.customer,
+                &d.amount.currency,
+                -d.amount.amount.minor_units,
+            ),
+            _ => {}
+        }
+    }
+    let mut out: Vec<(String, CurrencyAmount)> = owed
+        .into_iter()
+        .filter(|(_, _, m)| *m > 0)
+        .map(|(n, c, m)| (n, CurrencyAmount::new(m as f64 / 100.0, c.as_str())))
+        .collect();
+    out.sort_by(|a, b| b.1.amount.minor_units.cmp(&a.1.amount.minor_units));
+    out
 }
 
 /// "3 rice", "2 crate soda (= 48)": the base-unit count only when a
@@ -1159,6 +1314,7 @@ fn event_time(e: &BusinessEvent) -> DateTime<Utc> {
         BusinessEvent::Expense(x) => x.occurred_at,
         BusinessEvent::StockUpdate(su) => su.occurred_at,
         BusinessEvent::Note(n) => n.occurred_at,
+        BusinessEvent::DebtPayment(d) => d.occurred_at,
     }
 }
 
@@ -1192,6 +1348,7 @@ fn set_time(e: &mut BusinessEvent, when: DateTime<Utc>) {
         BusinessEvent::Expense(x) => x.occurred_at = when,
         BusinessEvent::StockUpdate(su) => su.occurred_at = when,
         BusinessEvent::Note(n) => n.occurred_at = when,
+        BusinessEvent::DebtPayment(d) => d.occurred_at = when,
     }
 }
 
@@ -1285,6 +1442,95 @@ mod tests {
         async fn complete_json(&self, _req: JsonCompletionRequest) -> Result<Value, LlmError> {
             Ok(self.0.clone())
         }
+    }
+
+    /// One scripted model reply per message, in order.
+    struct QueueProvider(std::sync::Mutex<std::collections::VecDeque<Value>>);
+
+    #[async_trait]
+    impl LlmProvider for QueueProvider {
+        async fn complete_json(&self, _req: JsonCompletionRequest) -> Result<Value, LlmError> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a reply for every message"))
+        }
+    }
+
+    #[tokio::test]
+    async fn credit_sales_returns_and_debts_add_up() {
+        let replies = [
+            json!({"events": [{"kind": "sale", "item_name": "rice", "quantity": 3.0, "unit_price_major": 120.0}]}),
+            json!({"events": [{"kind": "sale", "item_name": "sugar", "quantity": 2.0, "unit_price_major": 150.0, "credit_to": "John"}]}),
+            json!({"events": [{"kind": "return", "item_name": "rice", "quantity": 1.0}]}),
+            json!({"events": [{"kind": "debt_payment", "customer": "john", "amount_major": 100.0, "paid_by": "mpesa"}]}),
+            json!({"events": [], "question": {"kind": "owed", "customer": "JOHN"}}),
+            json!({"events": [], "question": {"kind": "owed", "customer": null}}),
+            json!({"events": [{"kind": "return", "item_name": "sugar", "quantity": 1.0}]}),
+            json!({"events": [{"kind": "return", "item_name": "milk", "quantity": 1.0}]}),
+        ];
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let business = BusinessProfile {
+            id: Uuid::new_v4(),
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+        };
+        let o = Orchestrator::new(
+            Nlu::new(QueueProvider(std::sync::Mutex::new(replies.into())), "en"),
+            store,
+            business,
+        );
+        let talk = |text: &'static str| {
+            let o = &o;
+            async move {
+                o.handle_message("chat", SourceChannel::Telegram, text)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        talk("sold 3 rice at 120").await;
+        let credit = talk("sold 2 sugar to John on credit at 150").await;
+        assert!(credit.contains("(credit: John)"), "{credit}");
+
+        // The return takes the rice sale's price; stock comes back.
+        let back = talk("returned 1 rice").await;
+        assert!(back.starts_with("Returned: 1 rice at 120.00 KES"), "{back}");
+        assert_eq!(
+            o.store.current_stock(o.business.id, "rice").await.unwrap(),
+            -2.0
+        );
+
+        let paid = talk("john paid 100 by mpesa").await;
+        assert!(
+            paid.starts_with("Debt paid: john 100.00 KES (M-Pesa)"),
+            "{paid}"
+        );
+        assert_eq!(
+            talk("how much does John owe?").await,
+            "John owes 200.00 KES."
+        );
+        assert_eq!(
+            talk("who owes me?").await,
+            "Owed to you:\n- John: 200.00 KES"
+        );
+
+        // A credit sale can't come back in part, and there's no milk sale.
+        let refused = talk("returned 1 sugar").await;
+        assert!(refused.contains("went on credit to John"), "{refused}");
+        assert!(
+            talk("returned 1 milk")
+                .await
+                .contains("can't find a sale of milk")
+        );
+        assert_eq!(
+            o.store.current_stock(o.business.id, "sugar").await.unwrap(),
+            -2.0
+        );
     }
 
     fn usd_sale() -> Value {

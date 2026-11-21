@@ -204,6 +204,9 @@ fn describe(events: &[BusinessEvent]) -> String {
                     .unwrap_or_default()
             ),
             BusinessEvent::Note(n) => format!("note '{}'", n.text),
+            BusinessEvent::DebtPayment(d) => {
+                format!("paid debt {} {}", d.customer, d.amount.major_units())
+            }
         })
         .collect();
     if parts.is_empty() {
@@ -291,6 +294,8 @@ mod scoring {
             recurring: None,
             source_channel: SourceChannel::Cli,
             paid_by: None,
+            credit_to: None,
+            returns: None,
             raw_text: None,
         })
     }

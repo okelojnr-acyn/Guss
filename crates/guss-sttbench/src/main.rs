@@ -255,9 +255,10 @@ fn first_amount_and_category(
             Some(e.amount.currency.clone()),
             e.category.clone(),
         ),
-        Some(BusinessEvent::StockUpdate(_)) | Some(BusinessEvent::Note(_)) | None => {
-            (None, None, None)
-        }
+        Some(BusinessEvent::StockUpdate(_))
+        | Some(BusinessEvent::Note(_))
+        | Some(BusinessEvent::DebtPayment(_))
+        | None => (None, None, None),
     }
 }
 

@@ -232,7 +232,7 @@ impl Store for SqliteStore {
 
     async fn to_sync(&self, business_id: Uuid, limit: i64) -> Result<Vec<SyncItem>, StoreError> {
         let rows = sqlx::query(
-            "SELECT rowid AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error, (voided_at IS NOT NULL) AS reverse FROM events WHERE business_id = ? AND kind IN ('sale', 'expense', 'stock_update') AND ((synced_at IS NULL AND voided_at IS NULL) OR (voided_at IS NOT NULL AND synced_at IS NOT NULL AND synced_at <> 'skipped' AND void_synced_at IS NULL)) ORDER BY rowid LIMIT ?",
+            "SELECT rowid AS number, payload, recorded_by_id, recorded_by_name, recorded_by_role, voided_at, voided_by, void_reason, sync_error, (voided_at IS NOT NULL) AS reverse FROM events WHERE business_id = ? AND kind IN ('sale', 'expense', 'stock_update', 'debt_payment') AND ((synced_at IS NULL AND voided_at IS NULL) OR (voided_at IS NOT NULL AND synced_at IS NOT NULL AND synced_at <> 'skipped' AND void_synced_at IS NULL)) ORDER BY rowid LIMIT ?",
         )
         .bind(business_id.to_string())
         .bind(limit)
@@ -619,6 +619,8 @@ mod tests {
             recurring: None,
             source_channel: SourceChannel::Cli,
             paid_by: None,
+            credit_to: None,
+            returns: None,
             raw_text: Some(format!("sold {qty} {item} at {price} each")),
         })
     }

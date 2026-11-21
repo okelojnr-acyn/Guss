@@ -273,6 +273,8 @@ mod tests {
             recurring: None,
             source_channel: SourceChannel::Cli,
             paid_by: None,
+            credit_to: None,
+            returns: None,
             raw_text: None,
         })
     }
