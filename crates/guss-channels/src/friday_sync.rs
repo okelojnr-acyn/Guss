@@ -196,10 +196,22 @@ async fn push(
         )));
     };
     if let Some(s) = sale {
-        if s.quantity < 0.0 {
-            return push_return(friday, &token, item.reverse, s).await;
+        if s.quantity < 0.0 && item.reverse {
+            // A return taken back: the customer kept it after all, so it
+            // is sold again at the same price, once.
+            let again = Sale {
+                quantity: -s.quantity,
+                paid_by: None,
+                ..s.clone()
+            };
+            let reference = format!("guss-unreturn:{}", s.id);
+            return push_sale(friday, business, &token, false, &again, reference).await;
         }
-        return push_sale(friday, business, &token, item.reverse, s).await;
+        if s.quantity < 0.0 {
+            return push_return(friday, &token, s).await;
+        }
+        let reference = format!("guss:{}", s.id);
+        return push_sale(friday, business, &token, item.reverse, s, reference).await;
     }
     if let Some(d) = debt {
         return push_debt_payment(friday, business, &token, item.reverse, d).await;
@@ -305,6 +317,7 @@ async fn push_sale(
     token: &str,
     reverse: bool,
     s: &Sale,
+    reference: String,
 ) -> Result<(), Failure> {
     let total = s.total();
     if !total
@@ -316,7 +329,6 @@ async fn push_sale(
             total.currency, business.default_currency
         )));
     }
-    let reference = format!("guss:{}", s.id);
     if reverse {
         // Find the sale Friday recorded and return it in full. Never
         // recorded, or already returned: nothing left to undo.
@@ -384,19 +396,8 @@ async fn push_sale(
 }
 
 /// A return ("returned 1 rice") gives back part of the Guss sale it
-/// names, at that sale's price; Friday refunds once per return id. Friday
-/// can't take a return back, so voiding one asks for a fresh sale.
-async fn push_return(
-    friday: &FridayClient,
-    token: &str,
-    reverse: bool,
-    r: &Sale,
-) -> Result<(), Failure> {
-    if reverse {
-        return Err(permanent(
-            "Friday can't undo a return; record the sale again instead",
-        ));
-    }
+/// names, at that sale's price; Friday refunds once per return id.
+async fn push_return(friday: &FridayClient, token: &str, r: &Sale) -> Result<(), Failure> {
     let original = r
         .returns
         .ok_or_else(|| permanent("this return doesn't name the sale it gives back"))?;
@@ -454,7 +455,8 @@ async fn push_return(
 }
 
 /// "John paid 500": settles John's oldest unpaid credit sales in Friday,
-/// once per payment id. Voiding it can't take the money back there.
+/// once per payment id. Voiding it takes the payment back there: those
+/// sales are owed again.
 async fn push_debt_payment(
     friday: &FridayClient,
     business: &BusinessProfile,
@@ -462,10 +464,23 @@ async fn push_debt_payment(
     reverse: bool,
     d: &DebtPayment,
 ) -> Result<(), Failure> {
+    let reference = format!("guss:{}", d.id);
     if reverse {
-        return Err(permanent(
-            "this payment is in Friday; correct it there (Invoicing)",
-        ));
+        return match friday
+            .post(
+                token,
+                &format!("/api/invoicing/pos/debts/payments/{reference}/reverse"),
+                &json!({}),
+            )
+            .await
+        {
+            // Never recorded there: nothing to take back.
+            Ok(_) | Err(FridayError::Status { status: 404, .. }) => Ok(()),
+            Err(FridayError::Status { status: 409, body }) => {
+                Err(permanent(format!("Friday refused to take it back: {body}")))
+            }
+            Err(e) => Err(e.into()),
+        };
     }
     if !d
         .amount
@@ -485,7 +500,7 @@ async fn push_debt_payment(
                 "customer_name": d.customer,
                 "amount_cents": d.amount.amount.minor_units,
                 "method": d.paid_by.as_deref().unwrap_or("cash"),
-                "client_payment_id": format!("guss:{}", d.id),
+                "client_payment_id": reference,
             }),
         )
         .await
@@ -1020,6 +1035,41 @@ mod tests {
                 .await
                 .unwrap(),
             4
+        );
+
+        // Both voided afterwards: the rice is sold again (the customer kept
+        // it), and the payment is taken back so John owes it again.
+        let boss = Actor::new("telegram:1", "Boss", Role::Owner);
+        store.void_event(back.id(), &boss, "kept it").await.unwrap();
+        store
+            .void_event(paid.id(), &boss, "wrong person")
+            .await
+            .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/invoicing/pos/sales"))
+            .and(body_partial_json(json!({
+                "client_sale_id": format!("guss-unreturn:{}", back.id()),
+                "lines": [{"quantity": 1.0}]
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number": "POS-U"})))
+            .with_priority(1) // ahead of the catch-all sale mock above
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/api/invoicing/pos/debts/payments/guss:{}/reverse",
+                paid.id()
+            )))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"reopened": ["POS-C"]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            2
         );
     }
 
