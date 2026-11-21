@@ -171,6 +171,76 @@ where
     }
 }
 
+/// "/paylink John": asks Friday for a Paystack page for everything John
+/// owes, as the person asking, and leaves a note so friday_sync checks
+/// it until John pays (then records "John paid").
+async fn pay_link<P, S>(
+    orchestrator: &Orchestrator<P, S>,
+    friday: &FridayClient,
+    actor: &Actor,
+    user_id: i64,
+    customer: &str,
+    language: &str,
+) -> String
+where
+    P: LlmProvider,
+    S: Store,
+{
+    let token = match friday.token_for(user_id).await {
+        Ok(Some(t)) => t,
+        _ => return telegram_ux::link_first(language, &orchestrator.business().name),
+    };
+    let reply = match friday
+        .post(
+            &token,
+            "/api/invoicing/pos/debts/paystack-link",
+            &serde_json::json!({ "customer_name": customer }),
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(crate::friday::FridayError::Status { body, .. }) => {
+            return telegram_ux::paylink_failed(language, &friday_reason(&body));
+        }
+        Err(crate::friday::FridayError::Forbidden(why)) => {
+            return telegram_ux::paylink_failed(language, &why);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't get a pay link");
+            return telegram_ux::paylink_failed(language, "Friday didn't answer; try again");
+        }
+    };
+    let (Some(reference), Some(url)) =
+        (reply["reference"].as_str(), reply["redirect_url"].as_str())
+    else {
+        return telegram_ux::paylink_failed(language, "Friday's answer was incomplete");
+    };
+    let who = reply["customer"].as_str().unwrap_or(customer);
+    let owed = guss_core::money::CurrencyAmount::new(
+        reply["owed_cents"].as_i64().unwrap_or(0) as f64 / 100.0,
+        reply["currency"].as_str().unwrap_or("KES"),
+    );
+    if let Err(e) = orchestrator
+        .note_pay_link(
+            actor,
+            &format!("Paystack pay link for {who}: {owed}"),
+            reference,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "couldn't keep the pay link note");
+    }
+    telegram_ux::paylink_sent(language, who, &owed.to_string(), url)
+}
+
+/// Friday's {"detail": "..."} reason, or the body as it came.
+fn friday_reason(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["detail"].as_str().map(str::to_string))
+        .unwrap_or_else(|| body.chars().take(200).collect())
+}
+
 async fn handle_message<P, S>(
     orchestrator: &Orchestrator<P, S>,
     voice: &VoiceSupport,
@@ -301,6 +371,17 @@ where
                 .await
                 .map_err(api)?;
             deliver(bot, access, chat_id, outcome).await?;
+            return Ok(());
+        }
+        Some(Command::PayLink(arg)) => {
+            let reply = match (arg.as_deref(), friday) {
+                (None, _) => telegram_ux::paylink_usage(&language),
+                (Some(_), None) => telegram_ux::link_unavailable(&language),
+                (Some(customer), Some(f)) => {
+                    pay_link(orchestrator, f, &actor, user_id, customer, &language).await
+                }
+            };
+            send_text(bot, chat_id, &reply).await?;
             return Ok(());
         }
         Some(Command::Unknown) => {

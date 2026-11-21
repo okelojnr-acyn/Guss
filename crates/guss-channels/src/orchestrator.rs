@@ -766,6 +766,26 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
 
     /// The last `limit` entries, newest first, with who recorded them and
     /// any void: "#12 Sold: 3 rice at 120.00 KES = 360.00 KES (Mary)".
+    /// Keeps the note "/paylink" leaves: friday_sync checks its Paystack
+    /// reference until the customer pays. A note never counts in totals.
+    pub async fn note_pay_link(
+        &self,
+        actor: &Actor,
+        text: &str,
+        reference: &str,
+    ) -> Result<(), OrchestratorError> {
+        let note = BusinessEvent::Note(guss_core::domain::Note {
+            id: uuid::Uuid::new_v4(),
+            business_id: self.business.id,
+            text: text.to_string(),
+            occurred_at: chrono::Utc::now(),
+            source_channel: guss_core::domain::SourceChannel::Telegram,
+            paystack_ref: Some(reference.to_string()),
+        });
+        self.store.save_event_by(&note, Some(actor)).await?;
+        Ok(())
+    }
+
     pub async fn history(&self, limit: i64) -> Result<String, OrchestratorError> {
         let language = self.business.language.as_str();
         let entries = self.store.journal(self.business.id, limit).await?;

@@ -434,6 +434,7 @@ fn to_business_event(
                 occurred_at: now,
                 source_channel,
                 raw_text: Some(raw_text.to_string()),
+                paystack_ref: None,
             })
         }
         ExtractedEvent::Note { text } => BusinessEvent::Note(Note {
@@ -442,6 +443,7 @@ fn to_business_event(
             text,
             occurred_at: now,
             source_channel,
+            paystack_ref: None,
         }),
     })
 }

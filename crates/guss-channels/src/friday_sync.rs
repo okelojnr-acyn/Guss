@@ -18,10 +18,15 @@
 
 use std::time::Duration;
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, DebtPayment, Sale};
+use guss_core::money::CurrencyAmount;
+use guss_core::people::{Actor, Role};
 use guss_core::store::{Store, StoreError, SyncItem};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::friday::{FridayClient, FridayError, telegram_id_of};
 use crate::items::normalize_name;
@@ -86,13 +91,115 @@ pub async fn sync_once<S: Store + ?Sized>(
     Ok(done)
 }
 
-/// Runs `sync_once` forever, every `SYNC_EVERY`.
+/// Pay links ("/paylink John") are checked for this many days.
+const PAY_LINK_DAYS: i64 = 14;
+
+/// Asks Friday about each open Paystack pay link: a note "/paylink" left
+/// that no payment has closed yet. Once the customer has paid, it goes in
+/// the journal as "John paid" (by M-Pesa, card or bank), so Guss's own
+/// "who owes me?" agrees with Friday, which recorded it already. A link
+/// paid when nothing was owed any more is closed by voiding its note.
+/// Returns how many payments it recorded.
+pub async fn check_pay_links<S: Store + ?Sized>(
+    store: &S,
+    friday: &FridayClient,
+    business: &BusinessProfile,
+) -> Result<usize, StoreError> {
+    let journal = store.journal(business.id, 500).await?;
+    let since = Utc::now() - chrono::Duration::days(PAY_LINK_DAYS);
+    // Voided ones too: a payment voided in Guss is never re-recorded.
+    let closed: HashSet<&str> = journal
+        .iter()
+        .filter_map(|e| match &e.event {
+            BusinessEvent::DebtPayment(d) => d.paystack_ref.as_deref(),
+            _ => None,
+        })
+        .collect();
+    let mut recorded = 0;
+    for entry in &journal {
+        let BusinessEvent::Note(n) = &entry.event else {
+            continue;
+        };
+        let Some(reference) = n.paystack_ref.as_deref() else {
+            continue;
+        };
+        if entry.voided.is_some() || n.occurred_at < since || closed.contains(reference) {
+            continue;
+        }
+        let Some(telegram_id) = entry.recorded_by_id.as_deref().and_then(telegram_id_of) else {
+            continue;
+        };
+        let token = match friday.token_for(telegram_id).await {
+            Ok(Some(t)) => t,
+            _ => continue,
+        };
+        let reply = match friday
+            .get(
+                &token,
+                &format!("/api/invoicing/pos/debts/paystack-link/{reference}"),
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, reference, "couldn't check a pay link");
+                continue;
+            }
+        };
+        if reply["status"] != "paid" {
+            continue;
+        }
+        let actor = Actor::new(
+            entry.recorded_by_id.clone().unwrap_or_default(),
+            entry.recorded_by.clone().unwrap_or_default(),
+            entry.recorded_by_role.unwrap_or(Role::Staff),
+        );
+        let cents = reply["paid_cents"].as_i64().unwrap_or(0);
+        if cents <= 0 {
+            store
+                .void_event(n.id, &actor, "paid through Paystack when nothing was owed")
+                .await?;
+            continue;
+        }
+        let paid_by = match reply["method"].as_str() {
+            Some("bank_transfer") => "bank",
+            Some(m) => m,
+            None => "card",
+        };
+        let event = BusinessEvent::DebtPayment(DebtPayment {
+            id: Uuid::new_v4(),
+            business_id: business.id,
+            customer: reply["customer"].as_str().unwrap_or_default().to_string(),
+            amount: CurrencyAmount::new(
+                cents as f64 / 100.0,
+                reply["currency"]
+                    .as_str()
+                    .unwrap_or(business.default_currency.as_str()),
+            ),
+            paid_by: Some(paid_by.to_string()),
+            occurred_at: Utc::now(),
+            source_channel: n.source_channel,
+            raw_text: Some(format!("Paystack pay link {reference}")),
+            paystack_ref: Some(reference.to_string()),
+        });
+        store.save_event_by(&event, Some(&actor)).await?;
+        recorded += 1;
+    }
+    Ok(recorded)
+}
+
+/// Runs `sync_once` (and the pay-link check) forever, every `SYNC_EVERY`.
 pub async fn run<S: Store + ?Sized>(store: &S, friday: &FridayClient, business: BusinessProfile) {
     loop {
         match sync_once(store, friday, &business).await {
             Ok(0) => {}
             Ok(n) => tracing::info!(entries = n, "sent to Friday"),
             Err(e) => tracing::warn!(error = %e, "Friday sync couldn't read the journal"),
+        }
+        match check_pay_links(store, friday, &business).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(payments = n, "pay links paid"),
+            Err(e) => tracing::warn!(error = %e, "couldn't check pay links"),
         }
         tokio::time::sleep(SYNC_EVERY).await;
     }
@@ -160,6 +267,10 @@ async fn push(
         _ => None,
     };
     let debt = match &entry.event {
+        // Paid through a Paystack link: Friday recorded it when Paystack
+        // confirmed it, and a void in Guss can't take back money that
+        // really came in. Nothing to send either way.
+        BusinessEvent::DebtPayment(d) if d.paystack_ref.is_some() => return Ok(()),
         BusinessEvent::DebtPayment(d) => Some(d),
         _ => None,
     };
@@ -678,6 +789,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_paid_pay_link_is_recorded_once_and_never_sent_back() {
+        use guss_core::domain::Note;
+        use wiremock::matchers::path_regex;
+
+        let server = friday_with(json!({"invoicing": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let reference = "org.debt-john.0a1b2c3d";
+        let note = BusinessEvent::Note(Note {
+            id: Uuid::new_v4(),
+            business_id,
+            text: "Paystack pay link for John: 1,500.00 KES".into(),
+            occurred_at: Utc::now(),
+            source_channel: SourceChannel::Telegram,
+            paystack_ref: Some(reference.into()),
+        });
+        store.save_event_by(&note, Some(&mary)).await.unwrap();
+        let client = FridayClient::new(server.uri(), KEY);
+        let check = format!("/api/invoicing/pos/debts/paystack-link/{reference}");
+
+        // Not paid yet: nothing recorded.
+        let waiting = Mock::given(method("GET"))
+            .and(path(check.as_str()))
+            .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "abandoned"})))
+            .mount_as_scoped(&server)
+            .await;
+        assert_eq!(
+            check_pay_links(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            0
+        );
+        drop(waiting);
+
+        Mock::given(method("GET"))
+            .and(path(check.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "paid", "customer": "John", "paid_cents": 150000,
+                "method": "mpesa", "currency": "KES"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Friday already has it: no debt payment may be posted.
+        Mock::given(method("POST"))
+            .and(path_regex("^/api/invoicing/pos/debts/payments"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            check_pay_links(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
+        // Closed now: checked no more.
+        assert_eq!(
+            check_pay_links(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            0
+        );
+        let journal = store.journal(business_id, 10).await.unwrap();
+        let paid = journal
+            .iter()
+            .find_map(|e| match &e.event {
+                BusinessEvent::DebtPayment(d) => Some(d.clone()),
+                _ => None,
+            })
+            .expect("John's payment is in the journal");
+        assert_eq!(paid.customer, "John");
+        assert_eq!(paid.amount, CurrencyAmount::new(1500.0, "KES"));
+        assert_eq!(paid.paid_by.as_deref(), Some("mpesa"));
+        assert_eq!(paid.paystack_ref.as_deref(), Some(reference));
+
+        // Syncing marks it done without sending it.
+        sync_once(&store, &client, &shop(business_id))
+            .await
+            .unwrap();
+        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_fraction_of_a_kilo_reaches_inventory_as_a_fraction() {
         let server = friday("write").await;
         let business_id = Uuid::new_v4();
@@ -969,6 +1167,7 @@ mod tests {
             occurred_at: Utc::now(),
             source_channel: SourceChannel::Telegram,
             raw_text: None,
+            paystack_ref: None,
         });
         for e in [&credit, &sold, &back, &paid] {
             store.save_event_by(e, Some(&mary)).await.unwrap();

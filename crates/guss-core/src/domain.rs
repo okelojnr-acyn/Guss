@@ -165,6 +165,10 @@ pub struct Note {
     pub text: String,
     pub occurred_at: DateTime<Utc>,
     pub source_channel: SourceChannel,
+    /// Set on the note "/paylink John" leaves: the Paystack reference
+    /// Guss checks with Friday until the customer pays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paystack_ref: Option<String>,
 }
 
 /// A customer paying what they owe for credit sales ("John paid 500").
@@ -180,6 +184,10 @@ pub struct DebtPayment {
     pub occurred_at: DateTime<Utc>,
     pub source_channel: SourceChannel,
     pub raw_text: Option<String>,
+    /// Paid through a Paystack pay link: Friday recorded it when Paystack
+    /// confirmed it, so it is never sent there again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paystack_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
