@@ -1135,7 +1135,7 @@ fn owed_by_customer(events: &[BusinessEvent]) -> Vec<(String, CurrencyAmount)> {
         .filter(|(_, _, m)| *m > 0)
         .map(|(n, c, m)| (n, CurrencyAmount::new(m as f64 / 100.0, c.as_str())))
         .collect();
-    out.sort_by(|a, b| b.1.amount.minor_units.cmp(&a.1.amount.minor_units));
+    out.sort_by_key(|row| std::cmp::Reverse(row.1.amount.minor_units));
     out
 }
 
