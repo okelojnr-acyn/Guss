@@ -387,7 +387,7 @@ async fn push(
             )
             .await?;
         if !existing.as_array().is_some_and(|a| !a.is_empty()) {
-            let (product_id, _) = find_or_create_product(friday, &token, name).await?;
+            let (product_id, _) = find_or_create_product(friday, &token, name, true).await?;
             friday
                 .post(
                     &token,
@@ -624,7 +624,7 @@ async fn push_sale(
             Err(e) => Err(e.into()),
         };
     }
-    let (product_id, tax_code) = find_or_create_product(friday, token, &s.item_name).await?;
+    let (product_id, tax_code) = find_or_create_product(friday, token, &s.item_name, false).await?;
     let mut line = json!({
         "description": s.item_name,
         "quantity": (s.quantity * 1000.0).round() / 1000.0,
@@ -822,10 +822,14 @@ fn account_id(accounts: &[Value], code: &str) -> Result<String, Failure> {
 /// The Inventory product with this name (any spelling Guss treats as the
 /// same item), created if Friday doesn't have it yet: its id and its tax
 /// type ("" for the business default).
+/// `track`: a product Guss makes for a restock counts its stock; one it
+/// makes for a sale doesn't (Guss can't know the shelf), so its sales
+/// never drive a count negative (Friday plan 20.2 #2).
 async fn find_or_create_product(
     friday: &FridayClient,
     token: &str,
     name: &str,
+    track: bool,
 ) -> Result<(String, String), Failure> {
     let wanted = normalize_name(name);
     let products = friday.get(token, "/api/inventory/products").await?;
@@ -849,7 +853,7 @@ async fn find_or_create_product(
         .post(
             token,
             "/api/inventory/products",
-            &json!({"name": name, "kind": "product"}),
+            &json!({"name": name, "kind": "product", "track_inventory": track}),
         )
         .await?;
     created
@@ -1615,8 +1619,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .mount(&server)
             .await;
+        // A product Guss makes for a sale doesn't track stock.
         Mock::given(method("POST"))
             .and(path("/api/inventory/products"))
+            .and(body_partial_json(json!({"track_inventory": false})))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "p-1"})))
             .mount(&server)
             .await;
