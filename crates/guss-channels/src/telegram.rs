@@ -257,6 +257,56 @@ fn friday_reason(body: &str) -> String {
 static MANAGER_MENUS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
     std::sync::LazyLock::new(Default::default);
 
+/// What Guss says about a scanned code: the product, as the person may see
+/// it in Friday, remembered so "sold 2" means that product.
+async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
+    friday: Option<&FridayClient>,
+    orchestrator: &crate::Orchestrator<P, S>,
+    actor: &Actor,
+    conversation_key: &str,
+    code: &str,
+    language: &str,
+) -> String {
+    let code = code.trim();
+    let business = orchestrator.business();
+    let Some(f) = friday else {
+        return format!("Scanned: {code}");
+    };
+    let token = match f.token_for_actor(&actor.id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return telegram_ux::link_first(language, &business.name),
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't get a Friday token for a scan");
+            return format!("Scanned: {code} (Friday didn't answer; try again)");
+        }
+    };
+    match crate::scan::find_product(f, &token, code).await {
+        Ok(Some(p)) => {
+            let name = p
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(code)
+                .to_string();
+            orchestrator.note_scanned(conversation_key, &name).await;
+            format!(
+                "{}\nSay \"sold 2\" or \"got 10\" to record it.",
+                crate::scan::product_line(&p, &business.default_currency)
+            )
+        }
+        Ok(None) => format!(
+            "No product in Friday has the code {code}. Add it in Inventory (barcode field), or tell me what it is."
+        ),
+        // No Inventory access for this person or for Guss: say so plainly.
+        Err(crate::friday::FridayError::Forbidden(_)) => {
+            format!("Scanned: {code}. You or Guss can't read Inventory in Friday.")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't look up a scanned code");
+            format!("Scanned: {code} (Friday didn't answer; try again)")
+        }
+    }
+}
+
 async fn handle_message<P, S>(
     orchestrator: &Orchestrator<P, S>,
     voice: &VoiceSupport,
@@ -372,6 +422,21 @@ where
     }
     let api = |e: crate::OrchestratorError| TelegramError::Api(e.to_string());
 
+    // A code from the scan page (plan 16.3).
+    if let Some(data) = msg.web_app_data() {
+        let reply = scanned(
+            friday,
+            orchestrator,
+            &actor,
+            &conversation_key,
+            &data.data,
+            &language,
+        )
+        .await;
+        send_text(bot, chat_id, &reply).await?;
+        return Ok(());
+    }
+
     match command {
         Some(Command::Start) => {
             let reply = telegram_ux::welcome(&language, &business_name, &user.first_name);
@@ -399,6 +464,19 @@ where
         Some(Command::History) => {
             let reply = orchestrator.history(15).await.map_err(api)?;
             send_text(bot, chat_id, &reply).await?;
+            return Ok(());
+        }
+        Some(Command::Scan) => {
+            let url = std::env::var("GUSS_CHANNEL__TELEGRAM_SCAN_URL").unwrap_or_default();
+            match telegram_ux::scan_keyboard(url.trim(), &language) {
+                Some(keyboard) => {
+                    bot.send_message(chat_id, telegram_ux::scan_prompt(&language))
+                        .reply_markup(keyboard)
+                        .await
+                        .map_err(|e| TelegramError::Api(e.to_string()))?;
+                }
+                None => send_text(bot, chat_id, telegram_ux::scan_not_set_up(&language)).await?,
+            }
             return Ok(());
         }
         Some(Command::Pending) => {

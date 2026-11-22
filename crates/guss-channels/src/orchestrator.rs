@@ -220,6 +220,8 @@ pub struct Orchestrator<P: LlmProvider, S: Store> {
     pending: Mutex<HashMap<String, PendingCommit>>,
     other_currency_policy: OtherCurrencyPolicy,
     held: Mutex<HashMap<String, Held>>,
+    /// The item last scanned in each chat (plan 16.3), for "sold 2".
+    scanned: Mutex<HashMap<String, (DateTime<Utc>, String)>>,
 }
 
 impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
@@ -231,6 +233,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             pending: Mutex::new(HashMap::new()),
             other_currency_policy: OtherCurrencyPolicy::default(),
             held: Mutex::new(HashMap::new()),
+            scanned: Mutex::new(HashMap::new()),
         }
     }
 
@@ -241,6 +244,15 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
 
     pub fn business(&self) -> &BusinessProfile {
         &self.business
+    }
+
+    /// The person just scanned `item`: their next message without an item
+    /// ("sold 2") is about it.
+    pub async fn note_scanned(&self, conversation_key: &str, item: &str) {
+        self.scanned
+            .lock()
+            .await
+            .insert(conversation_key.to_string(), (Utc::now(), item.to_string()));
     }
 
     /// Handles one inbound message as the owner (CLI, and channels that
@@ -358,6 +370,13 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             .collect();
         if let Some(line) = self.catalog().await?.context_line(language) {
             context_snippets.push(line);
+        }
+        if let Some((at, item)) = self.scanned.lock().await.get(conversation_key)
+            && Utc::now() - *at <= QUESTION_TTL
+        {
+            context_snippets.push(format!(
+                "The person just scanned \"{item}\": a message that names no item (\"sold 2\", \"got 10\") is about {item}."
+            ));
         }
 
         let extraction = self

@@ -52,3 +52,15 @@ a friend - Guss downloads it, converts it with `ffmpeg`, and transcribes
 it the same way as the CLI's `voice <path>` command, provided you've set
 up local Whisper or another STT provider (see
 [setup-elevenlabs-piper.md](setup-elevenlabs-piper.md)).
+
+## Scanning (optional)
+
+`/scan` shows a **📷 Scan** button that opens Friday's scan page inside
+Telegram (its QR scanner, or the phone's barcode reader). Set:
+
+```
+GUSS_CHANNEL__TELEGRAM_SCAN_URL=https://<your Friday web>/telegram-scan.html
+```
+
+A scanned code is looked up in Friday Inventory (barcode, then SKU) as the
+person who scanned it; their next "sold 2" or "got 10" is about that item.
