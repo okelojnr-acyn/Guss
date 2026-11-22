@@ -333,6 +333,7 @@ fn to_business_event(
             unit_amount_major,
             currency,
             category,
+            reimburse,
         } => {
             let qty = quantity.unwrap_or(1.0);
             let each =
@@ -354,6 +355,7 @@ fn to_business_event(
                 recurring: None,
                 source_channel,
                 raw_text: Some(raw_text.to_string()),
+                reimburse,
             })
         }
         ExtractedEvent::StockUpdate {

@@ -62,6 +62,9 @@ pub enum ExtractedEvent {
         unit_amount_major: Option<f64>,
         currency: Option<String>,
         category: Option<String>,
+        /// Who paid, only when said: true if the speaker used their OWN money and wants it back ("I paid from my pocket", "pesa yangu, nirudishiwe", "pakai uang saya"); false if business money or the till paid ("from the till", "pesa ya duka"). Null if not said.
+        #[serde(default)]
+        reimburse: Option<bool>,
     },
     /// Stock received to resell (positive delta, usually with what was
     /// paid) or lost/spoiled/written off (negative delta, no cost).

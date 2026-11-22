@@ -42,6 +42,7 @@ Which event:
 Numbers:
 - NEVER calculate. Copy each number exactly as said into the matching field: a price for one -> unit_price_major / unit_cost_major / unit_amount_major; a price for all of them together -> total_major / total_cost_major / amount_major; both if both were said. Guss's own code multiplies and checks.
 - Never invent a number. If a price wasn't said, leave it null.
+- Expense reimburse only when the message says who paid: their OWN money/pocket ("I paid from my pocket", "pesa yangu", "nirudishiwe", "pay me back") -> true; the shop's money or the till ("from the till", "pesa ya duka", "business paid") -> false. Otherwise null (Guss asks).
 - paid_by only when the message says how the customer paid: "cash"/"pesa taslimu" -> "cash"; "M-Pesa"/"mpesa"/"lipa na mpesa"/"till"/"paybill" -> "mpesa"; "Airtel Money" -> "airtel"; "card"/"visa"/"kadi" -> "card"; "bank"/"transfer" -> "bank". Otherwise null. Sold "on credit"/"deni" is not a payment: leave paid_by null.
 - Credit: a sale the customer will pay for later ("on credit", "deni", "mkopo", "will pay later") -> sale with credit_to = the customer's name as said. A customer paying for earlier credit sales -> debt_payment (never a sale). Something brought back by a customer -> return (quantity positive; never a negative sale). "Who owes me?" -> question {"kind": "owed", "customer": null}.
 - When: days_ago is null for today; "yesterday"/"jana" -> 1, "the day before yesterday"/"juzi" -> 2, a weekday or date in the past week -> how many days back it was. Never guess a date that wasn't said.
@@ -89,6 +90,7 @@ Jenis kejadian:
 
 Angka:
 - JANGAN PERNAH menghitung. Salin setiap angka persis seperti yang disebut ke kolom yang sesuai: harga satu -> unit_price_major / unit_cost_major / unit_amount_major; harga untuk semuanya -> total_major / total_cost_major / amount_major; isi keduanya jika keduanya disebut. Kode Guss sendiri yang mengalikan dan memeriksa.
+- reimburse pada pengeluaran hanya jika disebut siapa yang membayar: uang pribadi ("pakai uang saya", "minta diganti") -> true; uang toko/kas ("dari kas", "uang toko") -> false. Selain itu null.
 - paid_by hanya jika pesan menyebut cara pelanggan membayar: "tunai"/"cash" -> "cash"; "kartu"/"debit"/"kredit card" -> "card"; "transfer"/"QRIS"/"bank" -> "bank". Selain itu null. "Utang"/"bon" bukan pembayaran: biarkan paid_by null.
 - Utang: penjualan yang dibayar nanti ("utang", "bon", "bayar nanti") -> sale dengan credit_to = nama pelanggan. Pelanggan membayar utang lama -> debt_payment (bukan sale). Barang dikembalikan pelanggan -> return (quantity positif). "Siapa yang punya utang?" -> question {"kind": "owed", "customer": null}.
 - Jangan mengarang angka. Jika harga tidak disebut, biarkan null.

@@ -467,3 +467,55 @@ pub fn return_of_credit_sale(item: &str, customer: &str, language: &str) -> Stri
         ),
     }
 }
+
+/// A staff member's expense with no word on who paid.
+pub fn who_paid_question(what: &str, language: &str) -> String {
+    match lang(language) {
+        Lang::Id => format!(
+            "Siapa yang membayar {what}? Balas 1 untuk usaha (uang toko), atau 2 kalau pakai uang Anda dan minta diganti."
+        ),
+        Lang::Sw => format!(
+            "Nani alilipia {what}? Jibu 1 kama ni biashara (pesa ya duka), au 2 kama ulitumia pesa yako na unataka urudishiwe."
+        ),
+        Lang::En => format!(
+            "Who paid for {what}? Reply 1 if the business paid (shop money), or 2 if you used your own money and want it back."
+        ),
+    }
+}
+
+pub fn who_paid_dropped(language: &str) -> String {
+    pick(
+        language,
+        "(The expense was not saved: say who paid next time, or send it again.)",
+        "(Pengeluaran tadi tidak disimpan: sebutkan siapa yang membayar, atau kirim lagi.)",
+        "(Matumizi hayakuhifadhiwa: sema nani alilipa, au tuma tena.)",
+    )
+    .to_string()
+}
+
+/// "1"/"business" -> Some(false), "2"/"me" -> Some(true): did the person
+/// pay with their own money?
+pub fn who_paid_answer(text: &str) -> Option<bool> {
+    const BUSINESS: &[&str] = &[
+        "1", "business", "shop", "till", "biashara", "duka", "usaha", "toko",
+    ];
+    const ME: &[&str] = &[
+        "2",
+        "me",
+        "mine",
+        "i paid",
+        "pay me back",
+        "mimi",
+        "yangu",
+        "saya",
+        "aku",
+    ];
+    let t = text.trim().trim_end_matches('.').to_lowercase();
+    if BUSINESS.contains(&t.as_str()) {
+        Some(false)
+    } else if ME.contains(&t.as_str()) {
+        Some(true)
+    } else {
+        None
+    }
+}

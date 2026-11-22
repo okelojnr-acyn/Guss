@@ -112,6 +112,11 @@ pub struct Expense {
     pub recurring: Option<RecurrenceInfo>,
     pub source_channel: SourceChannel,
     pub raw_text: Option<String>,
+    /// Who paid: Some(true) the person who recorded it used their own
+    /// money and wants it back; Some(false) the business paid; None not
+    /// said (the business, for the owner; Guss asks anyone else).
+    #[serde(default)]
+    pub reimburse: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
