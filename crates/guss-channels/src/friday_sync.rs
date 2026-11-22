@@ -39,6 +39,8 @@ const BATCH: i64 = 50;
 const CASH: &str = "1010";
 const INVENTORY_ASSET: &str = "1400";
 const SHOP_EXPENSES: (&str, &str) = ("6900", "Shop expenses");
+/// Expenses staff paid from their own pocket, until they're paid back.
+const OWED_TO_STAFF: (&str, &str) = ("2150", "Owed to staff");
 
 /// Why an entry didn't reach Friday. `permanent` ones are shown in
 /// /history and not retried.
@@ -244,7 +246,11 @@ fn booking(event: &BusinessEvent) -> Option<(&'static str, &'static str, i64, St
     match event {
         BusinessEvent::Expense(x) => Some((
             SHOP_EXPENSES.0,
-            CASH,
+            if x.reimburse == Some(true) {
+                OWED_TO_STAFF.0
+            } else {
+                CASH
+            },
             cents(x.amount.major_units()),
             x.amount.currency.clone(),
             format!("Guss: {}", x.description),
@@ -403,10 +409,15 @@ async fn push(
             } else {
                 (debit, credit)
             };
-            let accounts = accounts(friday, &token).await?;
+            let accounts = accounts(friday, &token, [debit, credit]).await?;
             let date = occurred_at(&entry.event)
                 .with_timezone(&business.timezone.trim().parse().unwrap_or(chrono_tz::UTC))
                 .date_naive();
+            let memo = if credit == OWED_TO_STAFF.0 || debit == OWED_TO_STAFF.0 {
+                format!("{memo} (paid by {who}, to pay back)")
+            } else {
+                memo
+            };
             let memo = if item.reverse {
                 format!("Reversal: {memo}")
             } else {
@@ -428,6 +439,78 @@ async fn push(
                     }),
                 )
                 .await?;
+        }
+    }
+
+    if let BusinessEvent::Expense(x) = &entry.event
+        && x.reimburse == Some(true)
+        && !item.reverse
+        && people.can_write("minions")
+    {
+        push_claim(friday, &token, x).await?;
+    }
+    Ok(())
+}
+
+/// "I paid, pay me back": a Minions expense claim for the person, so it
+/// goes through approval and payout like any other claim. Tagged with the
+/// entry id and checked first, so a retry never claims twice.
+// shortcut: voiding the Guss entry leaves the claim for an approver to reject; withdraw it when Minions gets a cancel route.
+async fn push_claim(
+    friday: &FridayClient,
+    token: &str,
+    x: &guss_core::domain::Expense,
+) -> Result<(), Failure> {
+    let tag = format!("(Guss {})", &x.id.to_string()[..8]);
+    let mine = friday
+        .get(token, "/api/minions/expense_claims?mine=true")
+        .await;
+    let mine = match mine {
+        // Not on the Minions staff list: the books still show it as owed.
+        Err(FridayError::Status { status: 404, .. }) => return Ok(()),
+        other => other?,
+    };
+    let existing = mine.as_array().into_iter().flatten().find(|c| {
+        c.get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|d| d.ends_with(&tag))
+    });
+    let claim = match existing {
+        Some(c) => c.clone(),
+        None => {
+            friday
+                .post(
+                    token,
+                    "/api/minions/expense_claims",
+                    &json!({
+                        "description": format!("{} {tag}", x.description),
+                        "amount_cents": (x.amount.major_units() * 100.0).round() as i64,
+                        "currency": x.amount.currency,
+                        "reimburse": true,
+                    }),
+                )
+                .await?
+        }
+    };
+    // The receipt photo sent with it, if Guss still has it.
+    if let (Some(photo), Some(id)) = (
+        crate::receipts::take(x.id),
+        claim.get("id").and_then(Value::as_str),
+    ) {
+        let path = format!("/api/minions/expense_claims/{id}/receipt");
+        match friday
+            .put_bytes(token, &path, "image/jpeg", photo.clone())
+            .await
+        {
+            Ok(_) => {}
+            // An older Minions, or the claim was already decided: the claim stands without it.
+            Err(FridayError::Status { status, .. }) if status < 500 && status != 429 => {
+                tracing::warn!(status, "Minions refused a receipt photo");
+            }
+            Err(e) => {
+                crate::receipts::put_back(x.id, photo);
+                return Err(e.into());
+            }
         }
     }
     Ok(())
@@ -639,23 +722,33 @@ async fn push_debt_payment(
     }
 }
 
-/// The org's accounts, adding "6900 Shop expenses" the first time.
-async fn accounts(friday: &FridayClient, token: &str) -> Result<Vec<Value>, Failure> {
+/// The org's accounts, adding "6900 Shop expenses" or "2150 Owed to
+/// staff" the first time an entry in `used` needs it.
+async fn accounts(
+    friday: &FridayClient,
+    token: &str,
+    used: [&str; 2],
+) -> Result<Vec<Value>, Failure> {
     let list = friday.get(token, "/api/accounting/accounts").await?;
     let mut accounts = list.as_array().cloned().unwrap_or_default();
     let has = |code: &str, a: &[Value]| {
         a.iter()
             .any(|x| x.get("code").and_then(Value::as_str) == Some(code))
     };
-    if !has(SHOP_EXPENSES.0, &accounts) {
-        let created = friday
-            .post(
-                token,
-                "/api/accounting/accounts",
-                &json!({"code": SHOP_EXPENSES.0, "name": SHOP_EXPENSES.1, "type": "expense"}),
-            )
-            .await?;
-        accounts.push(created);
+    for (code, name, kind) in [
+        (SHOP_EXPENSES.0, SHOP_EXPENSES.1, "expense"),
+        (OWED_TO_STAFF.0, OWED_TO_STAFF.1, "liability"),
+    ] {
+        if used.contains(&code) && !has(code, &accounts) {
+            let created = friday
+                .post(
+                    token,
+                    "/api/accounting/accounts",
+                    &json!({"code": code, "name": name, "type": kind}),
+                )
+                .await?;
+            accounts.push(created);
+        }
     }
     Ok(accounts)
 }
@@ -1160,6 +1253,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn money_staff_paid_is_owed_to_them_and_claimed_in_minions() {
+        let server = friday_with(json!({"accounting": "write", "minions": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let id = Uuid::new_v4();
+        let fuel = BusinessEvent::Expense(Expense {
+            id,
+            business_id,
+            description: "fuel".into(),
+            amount: CurrencyAmount::new(2500.0, "KES"),
+            category: None,
+            occurred_at: Utc::now(),
+            recurring: None,
+            source_channel: SourceChannel::Telegram,
+            raw_text: None,
+            reimburse: Some(true),
+        });
+        store.save_event_by(&fuel, Some(&mary)).await.unwrap();
+        // Mary sent the receipt photo with it.
+        crate::receipts::hold("chat-mary", vec![0xFF, 0xD8, 0xFF]);
+        crate::receipts::attach("chat-mary", &[id]);
+
+        Mock::given(method("GET"))
+            .and(path("/api/accounting/journal_entries"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/accounting/accounts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": "a-cash", "code": "1010"}, {"id": "a-shop", "code": "6900"}
+            ])))
+            .mount(&server)
+            .await;
+        // Owed to staff, not cash: added the first time.
+        Mock::given(method("POST"))
+            .and(path("/api/accounting/accounts"))
+            .and(body_partial_json(
+                json!({"code": "2150", "type": "liability"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(json!({"id": "a-owed", "code": "2150"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/accounting/journal_entries"))
+            .and(body_partial_json(json!({
+                "memo": "Guss: fuel (paid by Mary, to pay back)",
+                "lines": [
+                    {"account_id": "a-shop", "debit_cents": 250000},
+                    {"account_id": "a-owed", "credit_cents": 250000}
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "je-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/minions/expense_claims"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/minions/expense_claims"))
+            .and(body_partial_json(json!({
+                "description": format!("fuel (Guss {})", &id.to_string()[..8]),
+                "amount_cents": 250000, "currency": "KES", "reimburse": true
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "c-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/minions/expense_claims/c-1/receipt"))
+            .and(header("content-type", "image/jpeg"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "c-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn expenses_and_sales_are_booked_in_accounting_as_drafts() {
         let server = friday_with(json!({"inventory": "none", "accounting": "write"})).await;
         let business_id = Uuid::new_v4();
@@ -1175,6 +1361,7 @@ mod tests {
             recurring: None,
             source_channel: SourceChannel::Telegram,
             raw_text: None,
+            reimburse: None,
         });
         store.save_event_by(&transport, Some(&mary)).await.unwrap();
 

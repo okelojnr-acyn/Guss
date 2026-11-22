@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Sale, SourceChannel};
 use guss_core::money::CurrencyAmount;
-use guss_core::people::{Action, Actor};
+use guss_core::people::{Action, Actor, Role};
 use guss_core::store::{JournalEntry, Store, StoreError, TimeWindow};
 use guss_insights::{build_report, compute_report, render_report};
 use guss_llm::LlmProvider;
@@ -83,6 +83,8 @@ enum Question {
     Duplicate,
     /// "rice usually sells at 120.00 KES; keep 12000.00 KES each?"
     Outlier,
+    /// "Who paid for fuel? 1 the business, 2 you (pay you back)."
+    WhoPaid,
 }
 
 #[derive(Debug, Error)]
@@ -200,6 +202,9 @@ struct PendingCommit {
     /// In confirmation order; None once that line was undone.
     event_ids: Vec<Option<Uuid>>,
     committed_at: DateTime<Utc>,
+    /// Expenses the person paid and wants back (their receipt photo goes
+    /// with the first).
+    pay_back: Vec<Uuid>,
 }
 
 /// Ties NLU extraction, storage, and report rendering together behind one
@@ -294,6 +299,14 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                         return self.commit(actor, conversation_key, h.events).await;
                     }
                     dropped_note = Some(texts::duplicate_dropped(language));
+                }
+                Question::WhoPaid => {
+                    if let Some(mine) = texts::who_paid_answer(&trimmed) {
+                        let mut events = h.events;
+                        set_who_paid(&mut events, mine);
+                        return self.prepare(actor, conversation_key, events, &home).await;
+                    }
+                    dropped_note = Some(texts::who_paid_dropped(language));
                 }
                 Question::Unit(q) => {
                     if let Some(count) = items::parse_count(&trimmed) {
@@ -431,6 +444,19 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         if let Some(reply) = self.price_returns(&mut events, language).await? {
             return Ok(reply);
         }
+        // First, so the later "keep" answers can save straight away.
+        // Who paid varies person to person (owner, 2026-11-22): the owner's
+        // unsaid means the business; anyone else is asked.
+        if let Some(what) = unsaid_who_paid(&events) {
+            if actor.role == Role::Owner {
+                set_who_paid(&mut events, false);
+            } else {
+                let reply = texts::who_paid_question(&what, language);
+                self.hold(conversation_key, events, Question::WhoPaid).await;
+                return Ok(reply);
+            }
+        }
+
         let catalog = self.catalog().await?;
         if let Some(q) = items::resolve(&mut events, &catalog) {
             let reply = items::unit_question_text(&q, language);
@@ -638,11 +664,30 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 PendingCommit {
                     event_ids: ids.into_iter().map(Some).collect(),
                     committed_at: Utc::now(),
+                    pay_back: events
+                        .iter()
+                        .filter_map(|e| match e {
+                            BusinessEvent::Expense(x) if x.reimburse == Some(true) => Some(x.id),
+                            _ => None,
+                        })
+                        .collect(),
                 },
             );
         }
 
         Ok(confirmation_reply(&lines, &self.business.language))
+    }
+
+    /// Pay-me-back expenses saved in this conversation in the last minute
+    /// (for the receipt photo that came with them).
+    pub async fn just_saved_pay_back(&self, conversation_key: &str) -> Vec<Uuid> {
+        self.pending
+            .lock()
+            .await
+            .get(conversation_key)
+            .filter(|p| Utc::now() - p.committed_at <= Duration::minutes(1))
+            .map(|p| p.pay_back.clone())
+            .unwrap_or_default()
     }
 
     /// Undoes the last confirmation: all of it, or only the numbered
@@ -1150,11 +1195,20 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
                 ),
             }
         }
-        BusinessEvent::Expense(e) => match language {
-            "id" => format!("Pengeluaran: {} sebesar {}", e.description, e.amount),
-            "sw" => format!("Matumizi: {} kiasi {}", e.description, e.amount),
-            _ => format!("Expense: {} for {}", e.description, e.amount),
-        },
+        BusinessEvent::Expense(e) => {
+            let line = match language {
+                "id" => format!("Pengeluaran: {} sebesar {}", e.description, e.amount),
+                "sw" => format!("Matumizi: {} kiasi {}", e.description, e.amount),
+                _ => format!("Expense: {} for {}", e.description, e.amount),
+            };
+            let paid_back = match (e.reimburse, language) {
+                (Some(true), "id") => " (uang pribadi, akan diganti)",
+                (Some(true), "sw") => " (pesa yako, utarudishiwa)",
+                (Some(true), _) => " (your own money, to be paid back)",
+                _ => "",
+            };
+            line + paid_back
+        }
         BusinessEvent::StockUpdate(su) => match (&su.unit_cost, language) {
             // A paid restock shows the arithmetic, so a wrong number is
             // caught at a glance: "+30 at 650.00 KES = 19500.00 KES paid".
@@ -1353,6 +1407,23 @@ fn foreign_currencies(events: &[BusinessEvent], home: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The first expense nobody said who paid for.
+fn unsaid_who_paid(events: &[BusinessEvent]) -> Option<String> {
+    events.iter().find_map(|e| match e {
+        BusinessEvent::Expense(x) if x.reimburse.is_none() => Some(x.description.clone()),
+        _ => None,
+    })
+}
+
+/// Fills in who paid on every expense that didn't say.
+fn set_who_paid(events: &mut [BusinessEvent], mine: bool) {
+    for e in events {
+        if let BusinessEvent::Expense(x) = e {
+            x.reimburse.get_or_insert(mine);
+        }
+    }
 }
 
 /// Same numbers, recorded in `currency` (the owner said the amount was in
@@ -2232,6 +2303,72 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn staff_are_asked_who_paid_an_expense_the_owner_is_not() {
+        use guss_core::people::Role;
+        let fuel = json!({"events": [{"kind": "expense", "description": "fuel", "amount_major": 2500.0,
+            "quantity": null, "unit_amount_major": null, "currency": null, "category": null}]});
+        let o = orchestrator(fuel, "en", OtherCurrencyPolicy::Ask).await;
+        let driver = person("dan", Role::Staff);
+        let ask = |text: &'static str| {
+            o.handle_message_as(&driver, &driver.id, SourceChannel::Telegram, text)
+        };
+        let reply = ask("fuel 2500").await.unwrap();
+        assert!(reply.starts_with("Who paid for fuel?"), "{reply}");
+        assert!(
+            who_paid_flags(&o).await.is_empty(),
+            "nothing saved until answered"
+        );
+        let reply = ask("2").await.unwrap();
+        assert!(
+            reply.contains("(your own money, to be paid back)"),
+            "{reply}"
+        );
+        assert_eq!(who_paid_flags(&o).await, vec![Some(true)]);
+
+        // "1": the business paid.
+        assert!(ask("fuel 2500").await.unwrap().starts_with("Who paid"));
+        assert!(ask("1").await.unwrap().starts_with("Expense: fuel"));
+        // The owner isn't asked: unsaid means the business.
+        let boss = person("boss", Role::Owner);
+        let reply = o
+            .handle_message_as(&boss, &boss.id, SourceChannel::Telegram, "fuel 2500")
+            .await
+            .unwrap();
+        assert!(
+            reply.starts_with("Looks like this was already recorded"),
+            "{reply}"
+        );
+        o.handle_message_as(&boss, &boss.id, SourceChannel::Telegram, "yes")
+            .await
+            .unwrap();
+        let mut got = who_paid_flags(&o).await;
+        got.sort();
+        assert_eq!(got, vec![Some(false), Some(false), Some(true)]);
+    }
+
+    async fn who_paid_flags(o: &Orchestrator<FixedProvider, SqliteStore>) -> Vec<Option<bool>> {
+        o.store
+            .list_events(o.business.id, TimeWindow::Day)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e {
+                BusinessEvent::Expense(x) => Some(x.reimburse),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn who_paid_answers() {
+        assert_eq!(texts::who_paid_answer("1"), Some(false));
+        assert_eq!(texts::who_paid_answer("Duka"), Some(false));
+        assert_eq!(texts::who_paid_answer("2."), Some(true));
+        assert_eq!(texts::who_paid_answer("mimi"), Some(true));
+        assert_eq!(texts::who_paid_answer("sold 3 rice"), None);
     }
 
     #[tokio::test]

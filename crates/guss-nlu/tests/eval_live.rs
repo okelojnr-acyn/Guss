@@ -311,6 +311,7 @@ mod scoring {
             recurring: None,
             source_channel: SourceChannel::Cli,
             raw_text: None,
+            reimburse: None,
         })
     }
 

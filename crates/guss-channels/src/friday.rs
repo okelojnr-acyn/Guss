@@ -298,6 +298,26 @@ impl FridayClient {
         Self::check(resp).await?.json().await.map_err(Self::net)
     }
 
+    /// PUT raw bytes (a photo) to an app route as `token`.
+    pub async fn put_bytes(
+        &self,
+        token: &str,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<Value, FridayError> {
+        let resp = self
+            .http
+            .put(format!("{}{path}", self.base))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::check(resp).await?.json().await.map_err(Self::net)
+    }
+
     /// POST to an app route as `token`.
     pub async fn post(&self, token: &str, path: &str, body: &Value) -> Result<Value, FridayError> {
         let resp = self
