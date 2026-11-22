@@ -247,6 +247,36 @@ where
 }
 
 /// Friday's {"detail": "..."} reason, or the body as it came.
+/// Some(reply) when voiding (or approving the void of) a large entry needs
+/// the person to confirm it's them first (plan 16.4). Only with Friday,
+/// and only when the void would really happen (`acts`).
+async fn step_up_for_void<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
+    friday: Option<&FridayClient>,
+    orchestrator: &crate::Orchestrator<P, S>,
+    actor: &Actor,
+    user_id: i64,
+    number: i64,
+    request: bool,
+    acts: bool,
+) -> Option<String> {
+    let f = friday?;
+    if !acts {
+        return None;
+    }
+    let (line, worth) = orchestrator.void_target(number, request).await.ok()??;
+    let home = orchestrator
+        .business()
+        .default_currency
+        .trim()
+        .to_uppercase();
+    if !crate::step_up::needed(worth.as_ref(), &home) {
+        return None;
+    }
+    let key = format!("{}:{number}", if request { "approve" } else { "void" });
+    let what = format!("Void {line}");
+    crate::step_up::gate(f, &actor.id, user_id, &key, &what).await
+}
+
 fn friday_reason(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -405,6 +435,20 @@ where
                 send_text(bot, chat_id, &telegram_ux::void_usage(&language)).await?;
                 return Ok(());
             };
+            if let Some(stop) = step_up_for_void(
+                friday,
+                orchestrator,
+                &actor,
+                user_id,
+                number,
+                false,
+                actor.role.can(guss_core::people::Action::VoidDirectly),
+            )
+            .await
+            {
+                send_text(bot, chat_id, &stop).await?;
+                return Ok(());
+            }
             let outcome = orchestrator
                 .void_entry(&actor, number, &reason)
                 .await
@@ -418,6 +462,20 @@ where
                 send_text(bot, chat_id, &telegram_ux::decide_usage(&language)).await?;
                 return Ok(());
             };
+            if let Some(stop) = step_up_for_void(
+                friday,
+                orchestrator,
+                &actor,
+                user_id,
+                number,
+                true,
+                approve && actor.role.can(guss_core::people::Action::DecideVoids),
+            )
+            .await
+            {
+                send_text(bot, chat_id, &stop).await?;
+                return Ok(());
+            }
             let outcome = orchestrator
                 .decide_void(&actor, number, approve)
                 .await

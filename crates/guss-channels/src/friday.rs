@@ -133,6 +133,44 @@ impl FridayClient {
         FridayError::Network(e.without_url().to_string())
     }
 
+    /// Starts a step-up check (plan 16.4) for a linked person: Friday's
+    /// check id and the one-time link they confirm on.
+    pub async fn start_step_up(
+        &self,
+        telegram_id: i64,
+        action: &str,
+    ) -> Result<(String, String), FridayError> {
+        let resp = self
+            .http
+            .post(format!("{}/guss/svc/step-up", self.base))
+            .bearer_auth(&self.key)
+            .json(&json!({"telegram_id": telegram_id, "action": action}))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let v: Value = Self::check(resp).await?.json().await.map_err(Self::net)?;
+        let field = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        Ok((field("id"), field("link")))
+    }
+
+    /// Whether the person has confirmed step-up check `id`.
+    pub async fn step_up_done(&self, id: &str) -> Result<bool, FridayError> {
+        let resp = self
+            .http
+            .get(format!("{}/guss/svc/step-up/{id}", self.base))
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let v: Value = Self::check(resp).await?.json().await.map_err(Self::net)?;
+        Ok(v.get("done").and_then(Value::as_bool).unwrap_or(false))
+    }
+
     /// A 6-digit code the person enters in Friday to link their account.
     pub async fn link_code(&self, telegram_id: i64, name: &str) -> Result<String, FridayError> {
         let resp = self

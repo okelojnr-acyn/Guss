@@ -1061,6 +1061,43 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             .await
             .map(Some)
     }
+
+    /// What a void would undo, for the step-up check (plan 16.4): the entry
+    /// line and its money. `request`: `number` is a void request's number.
+    pub async fn void_target(
+        &self,
+        number: i64,
+        request: bool,
+    ) -> Result<Option<(String, Option<CurrencyAmount>)>, OrchestratorError> {
+        let number = if request {
+            match self
+                .store
+                .pending_void_requests(self.business.id)
+                .await?
+                .into_iter()
+                .find(|r| r.number == number)
+            {
+                Some(r) => r.entry,
+                None => return Ok(None),
+            }
+        } else {
+            number
+        };
+        let Some(e) = self.store.journal_entry(self.business.id, number).await? else {
+            return Ok(None);
+        };
+        let worth = match &e.event {
+            BusinessEvent::Sale(s) => Some(s.total()),
+            BusinessEvent::Expense(x) => Some(x.amount.clone()),
+            BusinessEvent::DebtPayment(d) => Some(d.amount.clone()),
+            BusinessEvent::StockUpdate(su) => su
+                .unit_cost
+                .as_ref()
+                .map(|c| CurrencyAmount::new(su.delta * c.major_units(), c.currency.as_str())),
+            BusinessEvent::Note(_) => None,
+        };
+        Ok(Some((self.entry_line(&e), worth)))
+    }
 }
 
 fn source_channel_tag(channel: SourceChannel) -> &'static str {
