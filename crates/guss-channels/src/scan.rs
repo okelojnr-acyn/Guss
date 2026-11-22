@@ -91,6 +91,31 @@ pub fn product_line(p: &Value, currency: &str) -> String {
     line
 }
 
+/// Friday sale lines for the sellable codes of a batch (the M-Pesa
+/// prompt charges the basket as one sale).
+pub fn sale_lines(products: &Value, codes: &[(String, f64)]) -> Vec<Value> {
+    codes
+        .iter()
+        .filter_map(|(code, n)| {
+            let p = matching(products, code).filter(|p| price_cents(p) > 0)?;
+            let mut line = serde_json::json!({
+                "description": name(p),
+                "quantity": n,
+                "unit_price_cents": price_cents(p),
+                "product_id": p.get("id")?,
+            });
+            if let Some(t) = p
+                .get("tax_code")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+            {
+                line["tax_code"] = serde_json::json!(t);
+            }
+            Some(line)
+        })
+        .collect()
+}
+
 /// The entries a Sell or Stock-in batch makes, plus a line for each code
 /// that can't be recorded (unknown, or no price to sell at).
 pub fn events(
@@ -196,6 +221,24 @@ mod tests {
         assert_eq!(
             parse(" 6161100 "),
             (Mode::Check, vec![("6161100".into(), 1.0)])
+        );
+    }
+
+    #[test]
+    fn friday_lines_carry_the_product_and_skip_what_cant_be_sold() {
+        let mut p = products();
+        p[0]["id"] = json!("p-sugar");
+        p[0]["tax_code"] = json!("B");
+        let codes = vec![
+            ("6161100".into(), 2.0),
+            ("999".into(), 1.0),
+            ("nope".into(), 1.0),
+        ];
+        assert_eq!(
+            sale_lines(&p, &codes),
+            vec![
+                json!({"description": "Sugar 1kg", "quantity": 2.0, "unit_price_cents": 15000, "product_id": "p-sugar", "tax_code": "B"})
+            ]
         );
     }
 

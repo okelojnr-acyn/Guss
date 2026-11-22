@@ -258,6 +258,18 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         self.prepare(actor, conversation_key, events, &home).await
     }
 
+    /// Entries whose money Friday already took (a scanned basket paid by an
+    /// M-Pesa prompt): saved as they are, with no checks or questions left
+    /// to ask, since the customer has paid.
+    pub async fn record_paid(
+        &self,
+        actor: &Actor,
+        conversation_key: &str,
+        events: Vec<BusinessEvent>,
+    ) -> Result<String, OrchestratorError> {
+        self.commit(actor, conversation_key, events).await
+    }
+
     /// The person just scanned `item`: their next message without an item
     /// ("sold 2") is about it.
     pub async fn note_scanned(&self, conversation_key: &str, item: &str) {
@@ -1215,6 +1227,7 @@ fn paid_label(paid_by: Option<&str>, language: &str) -> String {
         (Some("cash"), "sw") => "pesa taslimu",
         (Some("cash"), _) => "cash",
         (Some("mpesa"), _) => "M-Pesa",
+        (Some(crate::friday_sync::PAID_THROUGH_FRIDAY), _) => "M-Pesa prompt, in Friday",
         (Some("airtel"), _) => "Airtel Money",
         (Some("card"), "id") => "kartu",
         (Some("card"), "sw") => "kadi",
