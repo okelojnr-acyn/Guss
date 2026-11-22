@@ -104,6 +104,19 @@ where
     let mut offset: i32 = 0;
 
     tracing::info!("Telegram channel starting (long polling)");
+    // Friday's "Link my Telegram" button needs this bot's username.
+    if let Some(f) = friday.as_ref() {
+        match bot.get_me().await {
+            Ok(me) => {
+                if let Some(username) = me.user.username.as_deref()
+                    && let Err(e) = f.report_bot(username).await
+                {
+                    tracing::warn!(error = %e, "couldn't tell Friday the bot's username");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "couldn't read the bot's username"),
+        }
+    }
     if access.is_open() {
         tracing::warn!(
             "No Telegram owner or allowed users set: anyone who finds this bot can record entries.              Set GUSS_CHANNEL__TELEGRAM_OWNER_CHAT_ID and/or GUSS_CHANNEL__TELEGRAM_ALLOWED_USER_IDS."
@@ -277,6 +290,29 @@ where
         send_text(bot, chat_id, &telegram_ux::your_id(&language, user_id)).await?;
         return Ok(());
     }
+    // The one-tap link from Friday ("Link my Telegram"): before the role
+    // check, since this is what gives them one.
+    if let Some(Command::StartLink(code)) = &command {
+        let reply = match friday {
+            None => telegram_ux::link_unavailable(&language),
+            Some(f) => match f.redeem(code, user_id, &user.first_name).await {
+                Ok(_) => {
+                    f.refresh().await;
+                    tracing::info!(user_id, "linked from Friday");
+                    telegram_ux::linked_ok(&language, &business_name)
+                }
+                Err(crate::friday::FridayError::Status { body, .. }) => {
+                    telegram_ux::linked_failed(&language, &friday_reason(&body))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "couldn't redeem a link from Friday");
+                    telegram_ux::linked_failed(&language, "Friday didn't answer; try again")
+                }
+            },
+        };
+        send_text(bot, chat_id, &reply).await?;
+        return Ok(());
+    }
     if command == Some(Command::Link) {
         let reply = match friday {
             None => telegram_ux::link_unavailable(&language),
@@ -412,7 +448,11 @@ where
             send_text(bot, chat_id, &telegram_ux::unknown_command(&language)).await?;
             return Ok(());
         }
-        Some(Command::Undo) | Some(Command::MyId) | Some(Command::Link) | None => {}
+        Some(Command::Undo)
+        | Some(Command::MyId)
+        | Some(Command::Link)
+        | Some(Command::StartLink(_))
+        | None => {}
     }
     let undo_text = (command == Some(Command::Undo)).then(|| "undo".to_string());
 

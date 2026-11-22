@@ -150,6 +150,45 @@ impl FridayClient {
             .to_string())
     }
 
+    /// Tells Friday this bot's username, so its "Link my Telegram" button
+    /// can open the bot (plan 16.2).
+    pub async fn report_bot(&self, username: &str) -> Result<(), FridayError> {
+        let resp = self
+            .http
+            .post(format!("{}/guss/svc/bot", self.base))
+            .bearer_auth(&self.key)
+            .json(&json!({"username": username}))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::check(resp).await?;
+        Ok(())
+    }
+
+    /// Redeems the one-time code from Friday's "Link my Telegram" (the
+    /// /start link-<code> payload): links this Telegram user to the person
+    /// who made it. Returns their Guss role ("owner", "manager", "staff").
+    pub async fn redeem(
+        &self,
+        code: &str,
+        telegram_id: i64,
+        name: &str,
+    ) -> Result<String, FridayError> {
+        let resp = self
+            .http
+            .post(format!("{}/guss/svc/redeem", self.base))
+            .bearer_auth(&self.key)
+            .json(&json!({"code": code, "telegram_id": telegram_id, "name": name}))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let v: Value = Self::check(resp).await?.json().await.map_err(Self::net)?;
+        Ok(v.get("guss_role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
+    }
+
     /// Linked people and the org's access matrix, cached for a minute.
     pub async fn people(&self) -> Result<Arc<People>, FridayError> {
         let mut cached = self.people.lock().await;

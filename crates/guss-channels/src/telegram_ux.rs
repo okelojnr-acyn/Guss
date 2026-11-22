@@ -92,6 +92,8 @@ pub enum Command {
     PayLink(Option<String>),
     /// "/retry 12": send entry 12 to Friday again (it was stopped).
     Retry(Option<String>),
+    /// "/start link-<code>": the one-tap link from Friday (plan 16.2).
+    StartLink(String),
     Unknown,
 }
 
@@ -105,7 +107,10 @@ pub fn parse_command(text: &str) -> Option<Command> {
         .map(|a| a.trim().to_string())
         .filter(|a| !a.is_empty());
     Some(match word.as_str() {
-        "start" => Command::Start,
+        "start" => match arg.as_deref().and_then(|a| a.strip_prefix("link-")) {
+            Some(code) if !code.is_empty() => Command::StartLink(code.to_string()),
+            _ => Command::Start,
+        },
         "help" | "bantuan" => Command::Help,
         "report" | "laporan" => Command::Report(arg),
         "undo" | "batal" => Command::Undo,
@@ -213,6 +218,34 @@ pub fn role_cant_use_guss(language: &str) -> String {
         "Your Telegram is linked, but your Friday role (view only) can't use Guss. \
          Ask the owner to change your role in Friday."
             .into()
+    }
+}
+
+/// "/start link-…" worked: the person's chat is linked to their Friday.
+pub fn linked_ok(language: &str, business: &str) -> String {
+    if is_id(language) {
+        format!(
+            "Tertaut! Telegram Anda sekarang terhubung ke akun Friday Anda di {business}. Kirim /help untuk mulai."
+        )
+    } else if is_sw(language) {
+        format!(
+            "Imeunganishwa! Telegram yako sasa imeunganishwa na akaunti yako ya Friday kwa {business}. Tuma /help kuanza."
+        )
+    } else {
+        format!(
+            "Linked! Your Telegram is now connected to your Friday account at {business}. Send /help to start."
+        )
+    }
+}
+
+/// "/start link-…" didn't work; `why` is Friday's reason.
+pub fn linked_failed(language: &str, why: &str) -> String {
+    if is_id(language) {
+        format!("Belum tertaut: {why}")
+    } else if is_sw(language) {
+        format!("Haijaunganishwa: {why}")
+    } else {
+        format!("Not linked: {why}")
     }
 }
 
@@ -645,6 +678,11 @@ mod tests {
     #[test]
     fn commands_parse() {
         assert_eq!(parse_command("/start"), Some(Command::Start));
+        assert_eq!(
+            parse_command("/start link-AbC_9"),
+            Some(Command::StartLink("AbC_9".into()))
+        );
+        assert_eq!(parse_command("/start link-"), Some(Command::Start));
         assert_eq!(
             parse_command("/report@shop_bot week"),
             Some(Command::Report(Some("week".into())))
