@@ -354,7 +354,13 @@ where
         Some(last) => format!("{} {last}", user.first_name),
         None => user.first_name.clone(),
     };
-    let actor = Actor::new(format!("telegram:{user_id}"), name, role);
+    let mut actor = Actor::new(format!("telegram:{user_id}"), name, role);
+    if role == Role::TeamLeader
+        && let Some(f) = friday
+        && let Ok(people) = f.people().await
+    {
+        actor = actor.with_team(people.team_of(user_id));
+    }
     // Owners' and managers' own chats get their fuller menu, once per run.
     if role >= Role::Manager
         && MANAGER_MENUS
@@ -670,14 +676,20 @@ async fn linked_without_role(friday: &FridayClient, user_id: i64) -> bool {
     })
 }
 
-/// Who hears about void requests: the owner and managers typed into
-/// Guss's settings, and every owner and manager linked through Friday
-/// (plan 16.1: linked owners never got them).
-async fn approvers(access: &TelegramAccess, friday: Option<&FridayClient>) -> Vec<i64> {
+/// Who hears about a void request from `from`: the owner and managers
+/// typed into Guss's settings, every owner and manager linked through
+/// Friday (plan 16.1: linked owners never got them), and `from`'s team
+/// leader.
+async fn approvers(access: &TelegramAccess, friday: Option<&FridayClient>, from: &str) -> Vec<i64> {
     let mut ids = access.approver_chats();
     if let Some(f) = friday
         && let Ok(people) = f.people().await
     {
+        if let Some(lead) = people.team_leader_of(from)
+            && !ids.contains(&lead)
+        {
+            ids.push(lead);
+        }
         for p in people.by_telegram.values() {
             if matches!(p.role, Some(Role::Owner | Role::Manager)) && !ids.contains(&p.telegram_id)
             {
@@ -702,7 +714,7 @@ async fn deliver(
     send_text(bot, chat_id, &outcome.reply).await?;
     for notice in outcome.notify {
         let (targets, text) = match notice {
-            Notify::Approvers(text) => (approvers(access, friday).await, text),
+            Notify::Approvers { from, text } => (approvers(access, friday, &from).await, text),
             Notify::Person(id, text) => {
                 match id.strip_prefix("telegram:").and_then(|n| n.parse().ok()) {
                     Some(n) => (vec![n], text),

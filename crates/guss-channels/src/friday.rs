@@ -50,6 +50,9 @@ pub struct Person {
     pub name: String,
     /// None: linked, but their Friday role (viewer) can't use Guss.
     pub role: Option<Role>,
+    /// Their Friday user id, and who they report to ("" for nobody).
+    pub user_id: String,
+    pub reports_to: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,6 +65,44 @@ pub struct People {
 impl People {
     pub fn can_write(&self, app: &str) -> bool {
         self.access.get(app).map(String::as_str) == Some("write")
+    }
+
+    /// A team leader's team as actor ids: everyone linked who reports to
+    /// them, by Telegram and by the Guss widget in Friday.
+    pub fn team_of(&self, telegram_id: i64) -> Vec<String> {
+        let Some(lead) = self
+            .by_telegram
+            .get(&telegram_id)
+            .filter(|p| !p.user_id.is_empty())
+        else {
+            return Vec::new();
+        };
+        let mut team = Vec::new();
+        for p in self
+            .by_telegram
+            .values()
+            .filter(|p| p.reports_to == lead.user_id)
+        {
+            team.push(format!("telegram:{}", p.telegram_id));
+            team.push(format!("friday:{}", p.user_id));
+        }
+        team
+    }
+
+    /// The team leader `actor_id` reports to, if they're linked.
+    pub fn team_leader_of(&self, actor_id: &str) -> Option<i64> {
+        let me = self.by_telegram.values().find(|p| {
+            actor_id == format!("telegram:{}", p.telegram_id)
+                || actor_id == format!("friday:{}", p.user_id)
+        })?;
+        self.by_telegram
+            .values()
+            .find(|p| {
+                p.role == Some(Role::TeamLeader)
+                    && !me.reports_to.is_empty()
+                    && p.user_id == me.reports_to
+            })
+            .map(|p| p.telegram_id)
     }
 }
 
@@ -79,6 +120,14 @@ struct PersonWire {
     telegram_name: String,
     #[serde(default)]
     guss_role: String,
+    /// Friday's own role ("team_leader"); Friday sends guss_role "staff"
+    /// for team leaders so older Guss versions keep them as staff.
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    reports_to: String,
 }
 
 #[derive(Deserialize)]
@@ -215,7 +264,12 @@ impl FridayClient {
                         Person {
                             telegram_id: p.telegram_id,
                             name: p.telegram_name,
-                            role: Role::parse(&p.guss_role),
+                            role: match (p.guss_role.as_str(), p.role.as_str()) {
+                                ("staff", "team_leader") => Some(Role::TeamLeader),
+                                (r, _) => Role::parse(r),
+                            },
+                            user_id: p.user_id,
+                            reports_to: p.reports_to,
                         },
                     )
                 })
@@ -335,4 +389,43 @@ impl FridayClient {
 /// "telegram:12345" -> 12345.
 pub fn telegram_id_of(actor_id: &str) -> Option<i64> {
     actor_id.strip_prefix("telegram:")?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_team_leader_gets_their_team_and_their_teams_requests() {
+        let person = |tg: i64, role: Role, user: &str, boss: &str| {
+            (
+                tg,
+                Person {
+                    telegram_id: tg,
+                    name: user.into(),
+                    role: Some(role),
+                    user_id: user.into(),
+                    reports_to: boss.into(),
+                },
+            )
+        };
+        let people = People {
+            by_telegram: [
+                person(1, Role::TeamLeader, "u-tl", ""),
+                person(2, Role::Staff, "u-mary", "u-tl"),
+                person(3, Role::Staff, "u-ann", ""),
+            ]
+            .into_iter()
+            .collect(),
+            access: HashMap::new(),
+        };
+        assert_eq!(
+            people.team_of(1),
+            vec!["telegram:2".to_string(), "friday:u-mary".to_string()]
+        );
+        assert!(people.team_of(3).is_empty());
+        assert_eq!(people.team_leader_of("telegram:2"), Some(1));
+        assert_eq!(people.team_leader_of("friday:u-mary"), Some(1));
+        assert_eq!(people.team_leader_of("telegram:3"), None);
+    }
 }
