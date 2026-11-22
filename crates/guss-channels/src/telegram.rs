@@ -276,6 +276,37 @@ async fn step_up_for_void<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
     crate::step_up::gate(f, &actor.id, user_id, &key, &what).await
 }
 
+/// A scanned batch of parcels, each sent to Friday Fleets as the person
+/// who scanned it: one line per parcel, saying what happened or why not.
+async fn parcels(
+    friday: &FridayClient,
+    token: &str,
+    action: &str,
+    codes: &[(String, f64)],
+) -> String {
+    let done = match action {
+        "out" => "out for delivery, with you",
+        "delivered" => "delivered",
+        "returned" => "returned",
+        _ => "received here",
+    };
+    let mut lines = Vec::with_capacity(codes.len());
+    for (code, _) in codes {
+        let body = serde_json::json!({"code": code, "action": action});
+        lines.push(match friday.post(token, "/api/fleets/parcels/scan", &body).await {
+            Ok(_) => format!("✅ {code}: {done}"),
+            Err(crate::friday::FridayError::Forbidden(m)) if m.contains("guss has no") => {
+                return "Guss may not use Fleets yet (Friday: Apps & integrations, Guss, Fleets: write).".into();
+            }
+            Err(crate::friday::FridayError::Forbidden(m) | crate::friday::FridayError::Status { body: m, .. }) => {
+                format!("❌ {code}: {}", friday_reason(&m))
+            }
+            Err(e) => format!("❌ {code}: {e}"),
+        });
+    }
+    lines.join("\n")
+}
+
 fn friday_reason(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -315,6 +346,9 @@ async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
             return format!("Scanned: {code} (Friday didn't answer; try again)");
         }
     };
+    if let Mode::Parcel(action) = mode {
+        return parcels(f, &token, action, &codes).await;
+    }
     let products = match f.get(&token, "/api/inventory/products").await {
         Ok(p) => p,
         // No Inventory access for this person or for Guss: say so plainly.
@@ -1104,6 +1138,39 @@ async fn send_text(bot: &Bot, chat_id: ChatId, text: &str) -> Result<(), Telegra
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_parcel_batch_says_what_happened_to_each() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/fleets/parcels/scan"))
+            .and(body_partial_json(
+                serde_json::json!({"code": "WB-1", "action": "out"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "p1"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/fleets/parcels/scan"))
+            .and(body_partial_json(serde_json::json!({"code": "WB-9"})))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(
+                    serde_json::json!({"detail": "no parcel WB-9; scan it in first"}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let friday = FridayClient::new(server.uri(), "fgs_key");
+        let codes = vec![("WB-1".to_string(), 1.0), ("WB-9".to_string(), 1.0)];
+        assert_eq!(
+            parcels(&friday, "tok", "out", &codes).await,
+            "✅ WB-1: out for delivery, with you
+❌ WB-9: no parcel WB-9; scan it in first"
+        );
+    }
+
     use super::*;
     use async_trait::async_trait;
     use guss_core::domain::BusinessProfile;
