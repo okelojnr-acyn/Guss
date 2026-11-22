@@ -94,6 +94,8 @@ pub enum Command {
     Retry(Option<String>),
     /// "/start link-<code>": the one-tap link from Friday (plan 16.2).
     StartLink(String),
+    /// Opens the scanner (plan 16.3).
+    Scan,
     Unknown,
 }
 
@@ -123,6 +125,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "link" | "tautkan" => Command::Link,
         "paylink" | "tautanbayar" | "kiungo" => Command::PayLink(arg),
         "retry" | "kirimulang" | "tumatena" => Command::Retry(arg),
+        "scan" | "pindai" | "skani" => Command::Scan,
         _ => Command::Unknown,
     })
 }
@@ -530,6 +533,7 @@ fn commands(language: &str) -> Vec<BotCommand> {
         "pending" => "Maombi ya kufuta ya kuidhinisha",
         "paylink" => "Kiungo cha malipo: /paylink Juma",
         "help" => "Jinsi ya kunitumia",
+        "scan" => "Skani barcode au QR",
         _ => "Onyesha kitambulisho chako cha Telegram",
     };
     let c = |cmd: &str, en: &str, id: &str| {
@@ -543,6 +547,11 @@ fn commands(language: &str) -> Vec<BotCommand> {
         BotCommand::new(cmd, text)
     };
     vec![
+        c(
+            "scan",
+            "Scan a barcode or QR code",
+            "Pindai barcode atau QR",
+        ),
         c(
             "report",
             "Sales report: today, week or month",
@@ -619,6 +628,48 @@ pub async fn apply_profile(bot: &Bot, business: &str, business_language: &str) {
     if ok {
         tracing::info!("Telegram bot profile set (description, about text, command menu)");
     }
+}
+
+/// The one-button keyboard that opens the scan page in Telegram.
+pub fn scan_keyboard(url: &str, language: &str) -> Option<teloxide::types::KeyboardMarkup> {
+    use teloxide::types::{ButtonRequest, KeyboardButton, KeyboardMarkup, WebAppInfo};
+    let url = url.parse().ok()?;
+    let label = pick_text(language, "📷 Scan", "📷 Pindai", "📷 Skani");
+    Some(
+        KeyboardMarkup::new(vec![vec![
+            KeyboardButton::new(label).request(ButtonRequest::WebApp(WebAppInfo { url })),
+        ]])
+        .resize_keyboard()
+        .one_time_keyboard(),
+    )
+}
+
+fn pick_text<'a>(language: &str, en: &'a str, id: &'a str, sw: &'a str) -> &'a str {
+    if is_id(language) {
+        id
+    } else if is_sw(language) {
+        sw
+    } else {
+        en
+    }
+}
+
+pub fn scan_prompt(language: &str) -> &'static str {
+    pick_text(
+        language,
+        "Tap 📷 Scan below, point at the barcode or QR code.",
+        "Ketuk 📷 Pindai di bawah, arahkan ke barcode atau kode QR.",
+        "Gusa 📷 Skani hapa chini, elekeza kwenye barcode au QR.",
+    )
+}
+
+pub fn scan_not_set_up(language: &str) -> &'static str {
+    pick_text(
+        language,
+        "Scanning isn't set up yet: the owner sets GUSS_CHANNEL__TELEGRAM_SCAN_URL to Friday's /telegram-scan.html.",
+        "Pemindaian belum diatur: pemilik mengisi GUSS_CHANNEL__TELEGRAM_SCAN_URL dengan /telegram-scan.html dari Friday.",
+        "Kuskani bado hakujawekwa: mwenye duka aweke GUSS_CHANNEL__TELEGRAM_SCAN_URL kwa /telegram-scan.html ya Friday.",
+    )
 }
 
 #[cfg(test)]
