@@ -16,6 +16,8 @@ pub enum Mode {
     Sell,
     Stock,
     Check,
+    /// Friday Fleets parcels: "in", "out", "delivered" or "returned".
+    Parcel(&'static str),
 }
 
 /// What the page sent: the mode and each code with how many times it was
@@ -32,6 +34,12 @@ pub fn parse(data: &str) -> (Mode, Vec<(String, f64)>) {
     let mode = match v.get("m").and_then(Value::as_str) {
         Some("sell") => Mode::Sell,
         Some("stock") => Mode::Stock,
+        Some("parcel") => Mode::Parcel(match v.get("a").and_then(Value::as_str) {
+            Some("out") => "out",
+            Some("delivered") => "delivered",
+            Some("returned") => "returned",
+            _ => "in",
+        }),
         _ => Mode::Check,
     };
     let codes = v
@@ -147,7 +155,7 @@ pub fn events(
                 source_channel: SourceChannel::Telegram,
                 raw_text,
             })),
-            Mode::Check => {}
+            Mode::Check | Mode::Parcel(_) => {}
         }
     }
     (out, problems)
@@ -196,6 +204,14 @@ mod tests {
         assert_eq!(
             parse(" 6161100 "),
             (Mode::Check, vec![("6161100".into(), 1.0)])
+        );
+        assert_eq!(
+            parse(r#"{"m":"parcel","a":"delivered","c":[["WB-1",1]]}"#),
+            (Mode::Parcel("delivered"), vec![("WB-1".into(), 1.0)])
+        );
+        assert_eq!(
+            parse(r#"{"m":"parcel","c":[["WB-1",1]]}"#).0,
+            Mode::Parcel("in")
         );
     }
 

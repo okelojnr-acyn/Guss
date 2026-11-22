@@ -653,10 +653,16 @@ pub fn scan_keyboard(url: &str, language: &str) -> Option<teloxide::types::Keybo
                     "stock",
                 )?,
             ],
-            vec![button(
-                pick_text(language, "🔎 Check", "🔎 Cek", "🔎 Angalia"),
-                "check",
-            )?],
+            vec![
+                button(
+                    pick_text(language, "🚚 Parcels", "🚚 Paket", "🚚 Vifurushi"),
+                    "parcel",
+                )?,
+                button(
+                    pick_text(language, "🔎 Check", "🔎 Cek", "🔎 Angalia"),
+                    "check",
+                )?,
+            ],
         ])
         .resize_keyboard()
         .persistent(),
