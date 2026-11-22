@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Sale, SourceChannel};
 use guss_core::money::CurrencyAmount;
-use guss_core::people::{Action, Actor, Role, TEAM_LEADER_LIMIT_MAJOR};
+use guss_core::people::{Action, Actor};
 use guss_core::store::{JournalEntry, Store, StoreError, TimeWindow};
 use guss_insights::{build_report, compute_report, render_report};
 use guss_llm::LlmProvider;
@@ -902,7 +902,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             return Ok(texts::not_allowed(language).into());
         }
         let mut pending = self.store.pending_void_requests(self.business.id).await?;
-        if actor.role == Role::TeamLeader {
+        if actor.role == guss_core::people::Role::TeamLeader {
             pending.retain(|r| actor.team.contains(&r.requested_by_id));
         }
         if pending.is_empty() {
@@ -947,20 +947,23 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         let author_role = entry.as_ref().and_then(|e| e.recorded_by_role);
         // No approving your own request, and no overruling the owner.
         let own = request.requested_by_id == actor.id;
-        if (own && actor.role != Role::Owner) || !actor.role.outranks_for_voids(author_role) {
+        if (own && actor.role != guss_core::people::Role::Owner)
+            || !actor.role.outranks_for_voids(author_role)
+        {
             return Ok(Outcome::reply(texts::not_allowed(language)));
         }
-        if actor.role == Role::TeamLeader {
+        if actor.role == guss_core::people::Role::TeamLeader {
             let home = self.home_currency();
             // No money in it (a note, a restock without a cost): within.
             let within = entry.as_ref().is_some_and(|e| {
                 event_value(&e.event).is_none_or(|v| {
                     v.currency.trim().eq_ignore_ascii_case(&home)
-                        && v.major_units().abs() <= TEAM_LEADER_LIMIT_MAJOR
+                        && v.major_units().abs() <= guss_core::people::TEAM_LEADER_LIMIT_MAJOR
                 })
             });
             if !actor.team.contains(&request.requested_by_id) || !within {
-                let limit = CurrencyAmount::new(TEAM_LEADER_LIMIT_MAJOR, home.as_str());
+                let limit =
+                    CurrencyAmount::new(guss_core::people::TEAM_LEADER_LIMIT_MAJOR, home.as_str());
                 return Ok(Outcome::reply(texts::team_leader_cannot(
                     &limit.to_string(),
                     language,
@@ -1212,6 +1215,20 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
 
 /// What each customer still owes: credit sales minus what they paid,
 /// largest first, in the business's currency per customer as recorded.
+/// What an entry is worth, for approval limits.
+fn event_value(e: &BusinessEvent) -> Option<CurrencyAmount> {
+    match e {
+        BusinessEvent::Sale(s) => Some(s.total()),
+        BusinessEvent::Expense(x) => Some(x.amount.clone()),
+        BusinessEvent::DebtPayment(d) => Some(d.amount.clone()),
+        BusinessEvent::StockUpdate(su) => su
+            .unit_cost
+            .as_ref()
+            .map(|c| CurrencyAmount::new(su.delta * c.major_units(), c.currency.as_str())),
+        BusinessEvent::Note(_) => None,
+    }
+}
+
 /// A credit sale taken back is voided, so it no longer counts.
 fn owed_by_customer(events: &[BusinessEvent]) -> Vec<(String, CurrencyAmount)> {
     let mut owed: Vec<(String, String, i64)> = Vec::new(); // name, currency, minor
@@ -1373,20 +1390,6 @@ fn foreign_currencies(events: &[BusinessEvent], home: &str) -> Vec<String> {
         }
     }
     out
-}
-
-/// What an entry is worth, for approval limits.
-fn event_value(e: &BusinessEvent) -> Option<CurrencyAmount> {
-    match e {
-        BusinessEvent::Sale(s) => Some(s.total()),
-        BusinessEvent::Expense(x) => Some(x.amount.clone()),
-        BusinessEvent::DebtPayment(d) => Some(d.amount.clone()),
-        BusinessEvent::StockUpdate(su) => su
-            .unit_cost
-            .as_ref()
-            .map(|c| CurrencyAmount::new(su.delta * c.major_units(), c.currency.as_str())),
-        BusinessEvent::Note(_) => None,
-    }
 }
 
 /// Same numbers, recorded in `currency` (the owner said the amount was in
