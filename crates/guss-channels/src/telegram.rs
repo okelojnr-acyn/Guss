@@ -241,6 +241,9 @@ fn friday_reason(body: &str) -> String {
         .unwrap_or_else(|| body.chars().take(200).collect())
 }
 
+static MANAGER_MENUS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
+    std::sync::LazyLock::new(Default::default);
+
 async fn handle_message<P, S>(
     orchestrator: &Orchestrator<P, S>,
     voice: &VoiceSupport,
@@ -316,6 +319,15 @@ where
         None => user.first_name.clone(),
     };
     let actor = Actor::new(format!("telegram:{user_id}"), name, role);
+    // Owners' and managers' own chats get their fuller menu, once per run.
+    if role >= Role::Manager
+        && MANAGER_MENUS
+            .lock()
+            .map(|mut m| m.insert(user_id))
+            .unwrap_or(false)
+    {
+        telegram_ux::apply_manager_menu(bot, chat_id, &language).await;
+    }
     let api = |e: crate::OrchestratorError| TelegramError::Api(e.to_string());
 
     match command {
@@ -333,7 +345,10 @@ where
                 Some(window) if window != TimeWindow::Day && !role.can(Action::ReportLonger) => {
                     crate::journal_texts::longer_reports_not_allowed(&language).to_string()
                 }
-                Some(window) => orchestrator.handle_report(window).await.map_err(api)?,
+                Some(window) => orchestrator
+                    .handle_report_for(&actor, window)
+                    .await
+                    .map_err(api)?,
                 None => telegram_ux::bad_report_window(&language),
             };
             send_text(bot, chat_id, &reply).await?;
@@ -664,6 +679,7 @@ mod tests {
     async fn redelivered_message_is_not_replied_to_twice() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex("(?i)sendmessage$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "ok": true,
                 "result": sample_message_json(1, 42, "reply")

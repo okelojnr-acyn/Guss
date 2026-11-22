@@ -6,7 +6,7 @@ use guss_core::domain::{BusinessEvent, BusinessProfile, Sale, SourceChannel};
 use guss_core::money::CurrencyAmount;
 use guss_core::people::{Action, Actor};
 use guss_core::store::{JournalEntry, Store, StoreError, TimeWindow};
-use guss_insights::{build_report, render_report};
+use guss_insights::{build_report, compute_report, render_report};
 use guss_llm::LlmProvider;
 use guss_nlu::{Nlu, NluError, extract_keywords};
 
@@ -747,7 +747,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     return Ok(texts::longer_reports_not_allowed(language).into());
                 }
                 let Some(about) = about.as_deref().map(str::trim).filter(|a| !a.is_empty()) else {
-                    return self.handle_report(window).await;
+                    return self.handle_report_for(actor, window).await;
                 };
                 let since = window.start_in(Utc::now(), &self.business.timezone);
                 let events = self
@@ -966,6 +966,38 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             )],
             reply,
         })
+    }
+
+    /// The report as this person may see it (plan 12.3): owners and
+    /// managers the whole shop; staff only what they recorded themselves.
+    pub async fn handle_report_for(
+        &self,
+        actor: &Actor,
+        window: TimeWindow,
+    ) -> Result<String, OrchestratorError> {
+        if actor.role.can(Action::ReportLonger) {
+            return self.handle_report(window).await;
+        }
+        let since = window.start_in(chrono::Utc::now(), &self.business.timezone);
+        // shortcut: the newest 5,000 entries; a person records far fewer in a day.
+        let mine: Vec<BusinessEvent> = self
+            .store
+            .journal(self.business.id, 5000)
+            .await?
+            .into_iter()
+            .filter(|e| {
+                e.voided.is_none() && e.recorded_by_id.as_deref() == Some(actor.id.as_str())
+            })
+            .map(|e| e.event)
+            .filter(|ev| event_time(ev) >= since)
+            .collect();
+        let low_stock = self.store.low_stock_items(self.business.id).await?;
+        let report = compute_report(&mine, low_stock, window, &self.business.default_currency);
+        Ok(render_report(
+            &report,
+            &format!("{} · {}", self.business.name, actor.name),
+            &self.business.language,
+        ))
     }
 
     pub async fn handle_report(&self, window: TimeWindow) -> Result<String, OrchestratorError> {
@@ -1880,6 +1912,29 @@ mod tests {
 
     fn person(id: &str, role: guss_core::people::Role) -> Actor {
         Actor::new(format!("telegram:{id}"), id, role)
+    }
+
+    #[tokio::test]
+    async fn staff_see_their_own_report_owners_the_whole_shop() {
+        use guss_core::people::Role;
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
+        let mary = person("mary", Role::Staff);
+        let joe = person("joe", Role::Staff);
+        let boss = person("boss", Role::Owner);
+        record_as(&o, &mary).await;
+        // The same sale from someone else is checked first; joe confirms.
+        o.handle_message_as(&joe, &joe.id, SourceChannel::Telegram, "sold 3 rice at 120")
+            .await
+            .unwrap();
+        o.handle_message_as(&joe, &joe.id, SourceChannel::Telegram, "yes")
+            .await
+            .unwrap();
+        assert_eq!(saved_sales(&o).await.len(), 2);
+
+        let mine = o.handle_report_for(&joe, TimeWindow::Day).await.unwrap();
+        assert!(mine.contains("360") && !mine.contains("720"), "{mine}");
+        let shop = o.handle_report_for(&boss, TimeWindow::Day).await.unwrap();
+        assert!(shop.contains("720"), "{shop}");
     }
 
     async fn record_as(o: &Orchestrator<FixedProvider, SqliteStore>, who: &Actor) {
