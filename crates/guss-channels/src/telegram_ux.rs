@@ -633,14 +633,33 @@ pub async fn apply_profile(bot: &Bot, business: &str, business_language: &str) {
 /// The one-button keyboard that opens the scan page in Telegram.
 pub fn scan_keyboard(url: &str, language: &str) -> Option<teloxide::types::KeyboardMarkup> {
     use teloxide::types::{ButtonRequest, KeyboardButton, KeyboardMarkup, WebAppInfo};
-    let url = url.parse().ok()?;
-    let label = pick_text(language, "📷 Scan", "📷 Pindai", "📷 Skani");
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let button = |label: &str, mode: &str| -> Option<KeyboardButton> {
+        let url = format!("{url}{sep}mode={mode}").parse().ok()?;
+        Some(KeyboardButton::new(label).request(ButtonRequest::WebApp(WebAppInfo { url })))
+    };
+    // Stays under the message box, so scanning is one tap (no /scan each time).
     Some(
-        KeyboardMarkup::new(vec![vec![
-            KeyboardButton::new(label).request(ButtonRequest::WebApp(WebAppInfo { url })),
-        ]])
+        KeyboardMarkup::new(vec![
+            vec![
+                button(pick_text(language, "🛒 Sell", "🛒 Jual", "🛒 Uza"), "sell")?,
+                button(
+                    pick_text(
+                        language,
+                        "📦 Stock in",
+                        "📦 Stok masuk",
+                        "📦 Mzigo umeingia",
+                    ),
+                    "stock",
+                )?,
+            ],
+            vec![button(
+                pick_text(language, "🔎 Check", "🔎 Cek", "🔎 Angalia"),
+                "check",
+            )?],
+        ])
         .resize_keyboard()
-        .one_time_keyboard(),
+        .persistent(),
     )
 }
 
@@ -657,9 +676,9 @@ fn pick_text<'a>(language: &str, en: &'a str, id: &'a str, sw: &'a str) -> &'a s
 pub fn scan_prompt(language: &str) -> &'static str {
     pick_text(
         language,
-        "Tap 📷 Scan below, point at the barcode or QR code.",
-        "Ketuk 📷 Pindai di bawah, arahkan ke barcode atau kode QR.",
-        "Gusa 📷 Skani hapa chini, elekeza kwenye barcode au QR.",
+        "Scan buttons are below the message box: Sell, Stock in or Check. Scan as many as you need, then tap Send.",
+        "Tombol pindai ada di bawah kotak pesan: Jual, Stok masuk, atau Cek. Pindai sebanyak perlu, lalu ketuk Kirim.",
+        "Vitufe vya kuskani viko chini ya sanduku la ujumbe: Uza, Mzigo umeingia au Angalia. Skani vingi upendavyo, kisha gusa Tuma.",
     )
 }
 

@@ -55,12 +55,15 @@ up local Whisper or another STT provider (see
 
 ## Scanning (optional)
 
-`/scan` shows a **📷 Scan** button that opens Friday's scan page inside
-Telegram (its QR scanner, or the phone's barcode reader). Set:
+`/scan` puts three buttons under the message box for good: **Sell**,
+**Stock in** and **Check**. Each opens Friday's scan page inside Telegram;
+the camera starts at once and keeps reading, so scan a whole batch, then
+tap Send. Sell records the batch as sales at Inventory's prices, Stock in
+adds the counts to stock, Check shows the item. Set:
 
 ```
 GUSS_CHANNEL__TELEGRAM_SCAN_URL=https://<your Friday web>/telegram-scan.html
 ```
 
-A scanned code is looked up in Friday Inventory (barcode, then SKU) as the
-person who scanned it; their next "sold 2" or "got 10" is about that item.
+Codes are looked up in Friday Inventory (barcode, then SKU) as the person
+who scanned them. Everything recorded gets the usual confirmation and undo.

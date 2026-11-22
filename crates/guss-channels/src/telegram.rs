@@ -287,17 +287,23 @@ fn friday_reason(body: &str) -> String {
 static MANAGER_MENUS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// What Guss says about a scanned code: the product, as the person may see
-/// it in Friday, remembered so "sold 2" means that product.
+/// A scanned batch (crate::scan): Sell and Stock in record it; Check shows
+/// the product, as the person may see it in Friday, remembered so "sold 2"
+/// means that product.
 async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
     friday: Option<&FridayClient>,
     orchestrator: &crate::Orchestrator<P, S>,
     actor: &Actor,
     conversation_key: &str,
-    code: &str,
+    data: &str,
     language: &str,
 ) -> String {
-    let code = code.trim();
+    use crate::scan::{self, Mode};
+    let (mode, codes) = scan::parse(data);
+    let Some((code, _)) = codes.first() else {
+        return "Nothing was scanned.".into();
+    };
+    let code = code.as_str();
     let business = orchestrator.business();
     let Some(f) = friday else {
         return format!("Scanned: {code}");
@@ -310,8 +316,36 @@ async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
             return format!("Scanned: {code} (Friday didn't answer; try again)");
         }
     };
-    match crate::scan::find_product(f, &token, code).await {
-        Ok(Some(p)) => {
+    let products = match f.get(&token, "/api/inventory/products").await {
+        Ok(p) => p,
+        // No Inventory access for this person or for Guss: say so plainly.
+        Err(crate::friday::FridayError::Forbidden(_)) => {
+            return format!("Scanned: {code}. You or Guss can't read Inventory in Friday.");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't look up scanned codes");
+            return format!("Scanned: {code} (Friday didn't answer; try again)");
+        }
+    };
+    if mode != Mode::Check {
+        // Sell or Stock in: record the batch, with the usual confirmation and undo.
+        let (events, problems) = scan::events(mode, &products, &codes, business);
+        let mut reply = problems.join("\n");
+        if !events.is_empty() {
+            let saved = orchestrator
+                .record(actor, conversation_key, events)
+                .await
+                .unwrap_or_else(|e| e.user_message(language));
+            reply = if reply.is_empty() {
+                saved
+            } else {
+                format!("{saved}\n{reply}")
+            };
+        }
+        return reply;
+    }
+    match scan::matching(&products, code) {
+        Some(p) => {
             let name = p
                 .get("name")
                 .and_then(serde_json::Value::as_str)
@@ -320,20 +354,12 @@ async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
             orchestrator.note_scanned(conversation_key, &name).await;
             format!(
                 "{}\nSay \"sold 2\" or \"got 10\" to record it.",
-                crate::scan::product_line(&p, &business.default_currency)
+                scan::product_line(p, &business.default_currency)
             )
         }
-        Ok(None) => format!(
+        None => format!(
             "No product in Friday has the code {code}. Add it in Inventory (barcode field), or tell me what it is."
         ),
-        // No Inventory access for this person or for Guss: say so plainly.
-        Err(crate::friday::FridayError::Forbidden(_)) => {
-            format!("Scanned: {code}. You or Guss can't read Inventory in Friday.")
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "couldn't look up a scanned code");
-            format!("Scanned: {code} (Friday didn't answer; try again)")
-        }
     }
 }
 

@@ -246,6 +246,18 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         &self.business
     }
 
+    /// Entries made without words (a scanned batch): the same checks and
+    /// confirmation, with undo, as a typed message.
+    pub async fn record(
+        &self,
+        actor: &Actor,
+        conversation_key: &str,
+        events: Vec<BusinessEvent>,
+    ) -> Result<String, OrchestratorError> {
+        let home = self.home_currency();
+        self.prepare(actor, conversation_key, events, &home).await
+    }
+
     /// The person just scanned `item`: their next message without an item
     /// ("sold 2") is about it.
     pub async fn note_scanned(&self, conversation_key: &str, item: &str) {
