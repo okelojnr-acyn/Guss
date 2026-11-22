@@ -442,10 +442,12 @@ async fn push(
         }
     }
 
-    if let BusinessEvent::Expense(x) = &entry.event {
-        if x.reimburse == Some(true) && !item.reverse && people.can_write("minions") {
-            push_claim(friday, &token, x).await?;
-        }
+    if let BusinessEvent::Expense(x) = &entry.event
+        && x.reimburse == Some(true)
+        && !item.reverse
+        && people.can_write("minions")
+    {
+        push_claim(friday, &token, x).await?;
     }
     Ok(())
 }
