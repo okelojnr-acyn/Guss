@@ -676,6 +676,36 @@ pub fn scan_keyboard(url: &str, language: &str) -> Option<teloxide::types::Keybo
     )
 }
 
+/// After a Sell scan: how the customer pays, as buttons.
+pub fn pay_keyboard(language: &str) -> teloxide::types::KeyboardMarkup {
+    use crate::basket::labels::{CANCEL, CASH, MPESA, pick};
+    use teloxide::types::{KeyboardButton, KeyboardMarkup};
+    KeyboardMarkup::new(vec![
+        vec![
+            KeyboardButton::new(pick(language, CASH)),
+            KeyboardButton::new(pick(language, MPESA)),
+        ],
+        vec![KeyboardButton::new(pick(language, CANCEL))],
+    ])
+    .resize_keyboard()
+    .one_time_keyboard()
+}
+
+/// After a Check scan found a product: what to do with it, as buttons.
+pub fn check_keyboard(language: &str) -> teloxide::types::KeyboardMarkup {
+    use crate::basket::labels::{DONE, GOT_MORE, SELL_ONE, pick};
+    use teloxide::types::{KeyboardButton, KeyboardMarkup};
+    KeyboardMarkup::new(vec![
+        vec![
+            KeyboardButton::new(pick(language, SELL_ONE)),
+            KeyboardButton::new(pick(language, GOT_MORE)),
+        ],
+        vec![KeyboardButton::new(pick(language, DONE))],
+    ])
+    .resize_keyboard()
+    .one_time_keyboard()
+}
+
 fn pick_text<'a>(language: &str, en: &'a str, id: &'a str, sw: &'a str) -> &'a str {
     if is_id(language) {
         id

@@ -47,12 +47,101 @@ pub fn waiting(chat: &str) -> bool {
 #[derive(Debug, PartialEq)]
 pub enum Answer {
     Cash,
+    /// The M-Pesa button: ask for the customer's number.
+    AskPhone,
     Phone(String),
     Cancel,
     Other,
 }
 
+/// The buttons Guss shows after a scan, so every next step is a tap
+/// (owner, 2026-11-22: "all these should be guided"). Each label is
+/// [en, id, sw]; a tap arrives as its label's text.
+pub mod labels {
+    pub const CASH: [&str; 3] = ["💵 Cash", "💵 Tunai", "💵 Taslimu"];
+    pub const MPESA: [&str; 3] = [
+        "📱 M-Pesa prompt",
+        "📱 Permintaan M-Pesa",
+        "📱 Ombi la M-Pesa",
+    ];
+    pub const CANCEL: [&str; 3] = ["✖ Cancel", "✖ Batal", "✖ Ghairi"];
+    pub const SELL_ONE: [&str; 3] = ["🛒 Sell 1", "🛒 Jual 1", "🛒 Uza 1"];
+    pub const GOT_MORE: [&str; 3] = ["📦 Got more", "📦 Stok masuk", "📦 Mzigo umeingia"];
+    pub const DONE: [&str; 3] = ["↩ Done", "↩ Selesai", "↩ Maliza"];
+
+    pub fn pick(language: &str, l: [&'static str; 3]) -> &'static str {
+        crate::journal_texts::pick(language, l[0], l[1], l[2])
+    }
+    pub fn is(text: &str, l: [&str; 3]) -> bool {
+        l.iter().any(|x| x.eq_ignore_ascii_case(text.trim()))
+    }
+}
+
+/// A checked product's next step.
+#[derive(Debug, PartialEq)]
+pub enum CheckTap {
+    SellOne,
+    GotMore,
+    Done,
+}
+
+pub fn check_tap(text: &str) -> Option<CheckTap> {
+    use labels::*;
+    if is(text, SELL_ONE) {
+        Some(CheckTap::SellOne)
+    } else if is(text, GOT_MORE) {
+        Some(CheckTap::GotMore)
+    } else if is(text, DONE) {
+        Some(CheckTap::Done)
+    } else {
+        None
+    }
+}
+
+/// The product a Check found, per chat, and whether Guss asked "how many came in?".
+type Checked = HashMap<String, (Instant, String, bool)>;
+static CHECKED: LazyLock<Mutex<Checked>> = LazyLock::new(Mutex::default);
+
+/// Remembers the product code a Check found, for the Sell 1 / Got more buttons.
+pub fn checked(chat: &str, code: &str) {
+    if let Ok(mut m) = CHECKED.lock() {
+        m.insert(chat.to_string(), (Instant::now(), code.to_string(), false));
+    }
+}
+
+/// The checked code, if any, and whether Guss asked "how many came in?".
+pub fn last_checked(chat: &str) -> Option<(String, bool)> {
+    let m = CHECKED.lock().ok()?;
+    let (at, code, asking) = m.get(chat)?;
+    (at.elapsed() <= WAIT).then(|| (code.clone(), *asking))
+}
+
+/// "Got more" was tapped: the next number is how many came in.
+pub fn ask_quantity(chat: &str) {
+    if let Ok(mut m) = CHECKED.lock()
+        && let Some(e) = m.get_mut(chat)
+    {
+        e.0 = Instant::now();
+        e.2 = true;
+    }
+}
+
+pub fn forget_checked(chat: &str) {
+    if let Ok(mut m) = CHECKED.lock() {
+        m.remove(chat);
+    }
+}
+
 pub fn answer(text: &str) -> Answer {
+    if labels::is(text, labels::CASH) {
+        return Answer::Cash;
+    }
+    if labels::is(text, labels::MPESA) {
+        return Answer::AskPhone;
+    }
+    if labels::is(text, labels::CANCEL) {
+        return Answer::Cancel;
+    }
     let t = text.trim().to_lowercase();
     if ["cash", "1", "tunai", "pesa taslimu", "taslimu", "cash."].contains(&t.as_str()) {
         return Answer::Cash;
@@ -75,16 +164,48 @@ pub mod say {
 
     pub fn question(total: &str, language: &str) -> String {
         match lang(language) {
-            Lang::Id => format!(
-                "Total {total}. Bagaimana pelanggan membayar? Balas tunai, atau nomor M-Pesa pelanggan untuk mengirim permintaan bayar. (batal untuk membuang)"
-            ),
-            Lang::Sw => format!(
-                "Jumla {total}. Mteja analipa vipi? Jibu cash, au namba ya M-Pesa ya mteja nimtumie ombi la kulipa. (hapana kuacha)"
-            ),
-            Lang::En => format!(
-                "Total {total}. How is the customer paying? Reply cash, or the customer's M-Pesa number to send them the payment prompt. (no to drop it)"
-            ),
+            Lang::Id => {
+                format!("Total {total}. Bagaimana pelanggan membayar? Ketuk tombol di bawah.")
+            }
+            Lang::Sw => format!("Jumla {total}. Mteja analipa vipi? Gusa kitufe hapa chini."),
+            Lang::En => format!("Total {total}. How is the customer paying? Tap a button below."),
         }
+    }
+
+    pub fn ask_phone(language: &str) -> &'static str {
+        crate::journal_texts::pick(
+            language,
+            "Type the customer's M-Pesa number (07…, 01… or +254…). They get the prompt on their phone.",
+            "Ketik nomor M-Pesa pelanggan (07…, 01… atau +254…). Mereka menerima permintaan di ponselnya.",
+            "Andika namba ya M-Pesa ya mteja (07…, 01… au +254…). Atapata ombi kwenye simu yake.",
+        )
+    }
+
+    pub fn not_a_phone(language: &str) -> &'static str {
+        crate::journal_texts::pick(
+            language,
+            "That isn't a phone number. Type it like 0712 345 678, or tap Cash or Cancel.",
+            "Itu bukan nomor telepon. Ketik seperti 0812 345 678, atau ketuk Tunai atau Batal.",
+            "Hiyo si namba ya simu. Andika kama 0712 345 678, au gusa Taslimu au Ghairi.",
+        )
+    }
+
+    pub fn how_many(language: &str) -> &'static str {
+        crate::journal_texts::pick(
+            language,
+            "How many came in? Type a number.",
+            "Berapa yang masuk? Ketik angka.",
+            "Ngapi zimeingia? Andika namba.",
+        )
+    }
+
+    pub fn ready(language: &str) -> &'static str {
+        crate::journal_texts::pick(
+            language,
+            "Ready: scan the next batch with the buttons below.",
+            "Siap: pindai berikutnya dengan tombol di bawah.",
+            "Tayari: skani inayofuata kwa vitufe vilivyo chini.",
+        )
     }
 
     pub fn dropped(language: &str) -> &'static str {
@@ -124,9 +245,9 @@ pub mod say {
     pub fn not_paid(language: &str) -> &'static str {
         crate::journal_texts::pick(
             language,
-            "No M-Pesa payment came in, so I cancelled the request (if they pay later, it's refunded). Reply cash if they paid another way, or send the number again.",
-            "Tidak ada pembayaran M-Pesa, jadi permintaan dibatalkan (kalau dibayar nanti, dikembalikan). Balas tunai kalau dibayar dengan cara lain, atau kirim nomornya lagi.",
-            "Hakuna malipo ya M-Pesa, kwa hiyo nimeghairi ombi (wakilipa baadaye, yatarudishwa). Jibu cash kama walilipa kwa njia nyingine, au tuma namba tena.",
+            "No M-Pesa payment came in, so I cancelled the request (if they pay later, it's refunded). Tap Cash if they paid another way, or M-Pesa prompt to try again.",
+            "Tidak ada pembayaran M-Pesa, jadi permintaan dibatalkan (kalau dibayar nanti, dikembalikan). Ketuk Tunai kalau dibayar dengan cara lain, atau Permintaan M-Pesa untuk mencoba lagi.",
+            "Hakuna malipo ya M-Pesa, kwa hiyo nimeghairi ombi (wakilipa baadaye, yatarudishwa). Gusa Taslimu kama walilipa kwa njia nyingine, au Ombi la M-Pesa kujaribu tena.",
         )
     }
 }
@@ -146,6 +267,22 @@ mod tests {
         assert_eq!(answer("no"), Answer::Cancel);
         assert_eq!(answer("sold 3 rice"), Answer::Other);
         assert_eq!(answer("12"), Answer::Other);
+        assert_eq!(answer("💵 Taslimu"), Answer::Cash);
+        assert_eq!(answer("📱 M-Pesa prompt"), Answer::AskPhone);
+        assert_eq!(answer("✖ Batal"), Answer::Cancel);
+    }
+
+    #[test]
+    fn check_buttons_lead_somewhere() {
+        assert_eq!(check_tap("🛒 Uza 1"), Some(CheckTap::SellOne));
+        assert_eq!(check_tap("📦 Got more"), Some(CheckTap::GotMore));
+        assert_eq!(check_tap("sold 2"), None);
+        checked("chat-c", "6161100");
+        assert_eq!(last_checked("chat-c"), Some(("6161100".into(), false)));
+        ask_quantity("chat-c");
+        assert_eq!(last_checked("chat-c"), Some(("6161100".into(), true)));
+        forget_checked("chat-c");
+        assert_eq!(last_checked("chat-c"), None);
     }
 
     #[test]

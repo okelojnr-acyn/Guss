@@ -425,9 +425,16 @@ async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
                 .unwrap_or(code)
                 .to_string();
             orchestrator.note_scanned(conversation_key, &name).await;
+            crate::basket::checked(conversation_key, code);
             format!(
-                "{}\nSay \"sold 2\" or \"got 10\" to record it.",
-                scan::product_line(p, &business.default_currency)
+                "{}\n{}",
+                scan::product_line(p, &business.default_currency),
+                crate::journal_texts::pick(
+                    language,
+                    "Tap Sell 1 or Got more below, or say \"sold 2\".",
+                    "Ketuk Jual 1 atau Stok masuk di bawah, atau bilang \"terjual 2\".",
+                    "Gusa Uza 1 au Mzigo umeingia hapa chini, au sema \"nimeuza 2\".",
+                )
             )
         }
         None => format!(
@@ -525,10 +532,11 @@ where
                     .record_paid(&actor, &conversation_key, events)
                     .await
                     .unwrap_or_else(|e| e.user_message(&language));
-                let _ = send_text(
+                let _ = send_guided(
                     &bot,
                     chat_id,
                     &format!("{}\n{saved}", say::paid(&total.to_string(), &language)),
+                    scan_markup(&language),
                 )
                 .await;
                 return;
@@ -545,7 +553,13 @@ where
             )
             .await;
         crate::basket::hold(&conversation_key, basket);
-        let _ = send_text(&bot, chat_id, say::not_paid(&language)).await;
+        let _ = send_guided(
+            &bot,
+            chat_id,
+            say::not_paid(&language),
+            Some(telegram_ux::pay_keyboard(&language).into()),
+        )
+        .await;
     });
     reply
 }
@@ -677,8 +691,77 @@ where
             &language,
         )
         .await;
-        send_text(bot, chat_id, &reply).await?;
+        send_guided(
+            bot,
+            chat_id,
+            &reply,
+            next_step(&conversation_key, &language),
+        )
+        .await?;
         return Ok(());
+    }
+
+    // A checked product's buttons: Sell 1, Got more (then how many), Done.
+    if let (Some((code, asking)), Some(text)) =
+        (crate::basket::last_checked(&conversation_key), msg.text())
+    {
+        use crate::basket::{CheckTap, check_tap};
+        let qty = text
+            .trim()
+            .replace(',', ".")
+            .parse::<f64>()
+            .ok()
+            .filter(|n| *n > 0.0);
+        let batch = match (check_tap(text), asking, qty) {
+            (Some(CheckTap::SellOne), _, _) => {
+                Some(serde_json::json!({"m": "sell", "c": [[code, 1]]}))
+            }
+            (_, true, Some(n)) => Some(serde_json::json!({"m": "stock", "c": [[code, n]]})),
+            (Some(CheckTap::GotMore), _, _) => {
+                crate::basket::ask_quantity(&conversation_key);
+                send_guided(
+                    bot,
+                    chat_id,
+                    crate::basket::say::how_many(&language),
+                    Some(teloxide::types::ForceReply::new().into()),
+                )
+                .await?;
+                return Ok(());
+            }
+            (Some(CheckTap::Done), _, _) => {
+                crate::basket::forget_checked(&conversation_key);
+                send_guided(
+                    bot,
+                    chat_id,
+                    crate::basket::say::ready(&language),
+                    scan_markup(&language),
+                )
+                .await?;
+                return Ok(());
+            }
+            // Anything else is an ordinary message ("sold 2" still works).
+            _ => None,
+        };
+        if let Some(batch) = batch {
+            crate::basket::forget_checked(&conversation_key);
+            let reply = scanned(
+                friday,
+                orchestrator,
+                &actor,
+                &conversation_key,
+                &batch.to_string(),
+                &language,
+            )
+            .await;
+            send_guided(
+                bot,
+                chat_id,
+                &reply,
+                next_step(&conversation_key, &language),
+            )
+            .await?;
+            return Ok(());
+        }
     }
 
     // The answer to "cash or M-Pesa number?" after a scanned Sell basket.
@@ -689,11 +772,40 @@ where
         let answer = crate::basket::answer(text);
         let basket = crate::basket::take(&conversation_key);
         match (answer, basket) {
+            // Something that looks like neither: keep the basket and say what to do.
+            (Answer::Other, Some(b)) if text.chars().any(|c| c.is_ascii_digit()) => {
+                crate::basket::hold(&conversation_key, b);
+                send_guided(
+                    bot,
+                    chat_id,
+                    say::not_a_phone(&language),
+                    Some(telegram_ux::pay_keyboard(&language).into()),
+                )
+                .await?;
+                return Ok(());
+            }
             (Answer::Other, _) | (_, None) => {
-                send_text(bot, chat_id, say::lapsed(&language)).await?;
+                send_guided(bot, chat_id, say::lapsed(&language), scan_markup(&language)).await?;
             }
             (Answer::Cancel, Some(_)) => {
-                send_text(bot, chat_id, say::dropped(&language)).await?;
+                send_guided(
+                    bot,
+                    chat_id,
+                    say::dropped(&language),
+                    scan_markup(&language),
+                )
+                .await?;
+                return Ok(());
+            }
+            (Answer::AskPhone, Some(b)) => {
+                crate::basket::hold(&conversation_key, b);
+                send_guided(
+                    bot,
+                    chat_id,
+                    say::ask_phone(&language),
+                    Some(teloxide::types::ForceReply::new().into()),
+                )
+                .await?;
                 return Ok(());
             }
             (Answer::Cash, Some(b)) => {
@@ -702,7 +814,7 @@ where
                     .record(&actor, &conversation_key, events)
                     .await
                     .unwrap_or_else(|e| e.user_message(&language));
-                send_text(bot, chat_id, &reply).await?;
+                send_guided(bot, chat_id, &reply, scan_markup(&language)).await?;
                 return Ok(());
             }
             (Answer::Phone(phone), Some(b)) => {
@@ -1126,6 +1238,42 @@ async fn deliver(
             }
         }
     }
+    Ok(())
+}
+
+/// The scan buttons again, when the scan page is set up.
+fn scan_markup(language: &str) -> Option<teloxide::types::ReplyMarkup> {
+    let url = std::env::var("GUSS_CHANNEL__TELEGRAM_SCAN_URL").unwrap_or_default();
+    telegram_ux::scan_keyboard(url.trim(), language).map(Into::into)
+}
+
+/// The buttons for what comes after a scan: how the customer pays, what
+/// to do with a checked product, or the scan buttons for the next batch.
+fn next_step(conversation_key: &str, language: &str) -> Option<teloxide::types::ReplyMarkup> {
+    if crate::basket::waiting(conversation_key) {
+        Some(telegram_ux::pay_keyboard(language).into())
+    } else if crate::basket::last_checked(conversation_key).is_some() {
+        Some(telegram_ux::check_keyboard(language).into())
+    } else {
+        scan_markup(language)
+    }
+}
+
+/// A reply with the buttons for the next step (owner, 2026-11-22: scans
+/// must be guided, never a dead end).
+async fn send_guided(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    markup: Option<teloxide::types::ReplyMarkup>,
+) -> Result<(), TelegramError> {
+    let Some(markup) = markup else {
+        return send_text(bot, chat_id, text).await;
+    };
+    bot.send_message(chat_id, text)
+        .reply_markup(markup)
+        .await
+        .map_err(|e| TelegramError::Api(e.to_string()))?;
     Ok(())
 }
 
