@@ -452,6 +452,42 @@ fn short_description(language: &str, business: &str) -> String {
     s.chars().take(120).collect()
 }
 
+/// The menu for staff: no approvals (plan 12.7, menus by role).
+fn staff_commands(language: &str) -> Vec<BotCommand> {
+    commands(language)
+        .into_iter()
+        .filter(|c| c.command != "pending")
+        .collect()
+}
+
+/// The menu for owners and managers: everything, plus /retry.
+fn manager_commands(language: &str) -> Vec<BotCommand> {
+    let mut cmds = commands(language);
+    let text = if is_id(language) {
+        "Kirim ulang catatan ke Friday: /retry 12"
+    } else if is_sw(language) {
+        "Tuma rekodi tena kwa Friday: /retry 12"
+    } else {
+        "Send an entry to Friday again: /retry 12"
+    };
+    cmds.push(BotCommand::new("retry", text));
+    cmds
+}
+
+/// Gives an owner's or manager's own chat their fuller menu. Logged, never
+/// fatal: commands are checked by role whatever the menu shows.
+pub async fn apply_manager_menu(bot: &Bot, chat_id: ChatId, language: &str) {
+    let res = bot
+        .set_my_commands(manager_commands(language))
+        .scope(teloxide::types::BotCommandScope::Chat {
+            chat_id: teloxide::types::Recipient::Id(chat_id),
+        })
+        .await;
+    if let Err(e) = res {
+        tracing::warn!(error = %e, "couldn't set a manager's command menu");
+    }
+}
+
 fn commands(language: &str) -> Vec<BotCommand> {
     let sw_of = |cmd: &str| match cmd {
         "report" => "Ripoti ya mauzo: leo, wiki au mwezi",
@@ -531,7 +567,9 @@ pub async fn apply_profile(bot: &Bot, business: &str, business_language: &str) {
         let mut short = bot
             .set_my_short_description()
             .short_description(short_description(lang, business));
-        let mut cmds = bot.set_my_commands(commands(lang));
+        // Everyone's menu is the staff one; owners and managers get theirs
+        // per chat (apply_manager_menu).
+        let mut cmds = bot.set_my_commands(staff_commands(lang));
         if !code.is_empty() {
             desc = desc.language_code(code);
             short = short.language_code(code);
