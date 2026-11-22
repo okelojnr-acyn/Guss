@@ -467,14 +467,14 @@ where
     {
         actor = actor.with_team(people.team_of(user_id));
     }
-    // Owners' and managers' own chats get their fuller menu, once per run.
-    if role >= Role::Manager
+    // Owners', managers' and team leaders' own chats get their fuller menu, once per run.
+    if role >= Role::TeamLeader
         && MANAGER_MENUS
             .lock()
             .map(|mut m| m.insert(user_id))
             .unwrap_or(false)
     {
-        telegram_ux::apply_manager_menu(bot, chat_id, &language).await;
+        telegram_ux::apply_manager_menu(bot, chat_id, &language, role).await;
     }
     let api = |e: crate::OrchestratorError| TelegramError::Api(e.to_string());
 

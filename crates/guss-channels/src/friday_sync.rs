@@ -309,7 +309,10 @@ async fn push(
             "Guss may not record sales in Friday yet (Friday: Apps & integrations, Guss: Invoicing)",
         ));
     }
-    if sale.is_none() && debt.is_none() && !to_inventory && !to_accounting {
+    // A pay-me-back expense also goes to Minions as a claim, on its own.
+    let to_minions = matches!(&entry.event, BusinessEvent::Expense(x) if x.reimburse == Some(true))
+        && people.can_write("minions");
+    if sale.is_none() && debt.is_none() && !to_inventory && !to_accounting && !to_minions {
         return Err(waiting(
             "Guss may not change Inventory or Accounting yet (Friday: Apps & integrations, Guss)",
         ));
@@ -443,11 +446,13 @@ async fn push(
     }
 
     if let BusinessEvent::Expense(x) = &entry.event
-        && x.reimburse == Some(true)
-        && !item.reverse
-        && people.can_write("minions")
+        && to_minions
     {
-        push_claim(friday, &token, x).await?;
+        if item.reverse {
+            withdraw_claim(friday, &token, x).await?;
+        } else {
+            push_claim(friday, &token, x).await?;
+        }
     }
     Ok(())
 }
@@ -455,7 +460,49 @@ async fn push(
 /// "I paid, pay me back": a Minions expense claim for the person, so it
 /// goes through approval and payout like any other claim. Tagged with the
 /// entry id and checked first, so a retry never claims twice.
-// shortcut: voiding the Guss entry leaves the claim for an approver to reject; withdraw it when Minions gets a cancel route.
+/// A voided pay-me-back expense: its Minions claim is withdrawn while it
+/// still waits. One already approved or paid stays for the approver (the
+/// money may have moved).
+async fn withdraw_claim(
+    friday: &FridayClient,
+    token: &str,
+    x: &guss_core::domain::Expense,
+) -> Result<(), Failure> {
+    let tag = format!("(Guss {})", &x.id.to_string()[..8]);
+    let mine = match friday
+        .get(token, "/api/minions/expense_claims?mine=true")
+        .await
+    {
+        Err(FridayError::Status { status: 404, .. }) => return Ok(()),
+        other => other?,
+    };
+    let waiting = mine.as_array().into_iter().flatten().find(|c| {
+        c.get("status").and_then(Value::as_str) == Some("submitted")
+            && c.get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|d| d.ends_with(&tag))
+    });
+    let Some(id) = waiting.and_then(|c| c.get("id")).and_then(Value::as_str) else {
+        return Ok(());
+    };
+    match friday
+        .post(
+            token,
+            &format!("/api/minions/expense_claims/{id}/withdraw"),
+            &json!({}),
+        )
+        .await
+    {
+        // An older Minions (no withdraw), or decided meanwhile: nothing to undo here.
+        Ok(_)
+        | Err(FridayError::Status {
+            status: 400 | 404 | 405,
+            ..
+        }) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 async fn push_claim(
     friday: &FridayClient,
     token: &str,
@@ -1228,6 +1275,66 @@ mod tests {
         );
         // Only stopped entries: a second resend changes nothing.
         assert!(!store.resend(business_id, number).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn voiding_a_pay_me_back_expense_withdraws_its_waiting_claim() {
+        let server = friday_with(json!({"minions": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let id = Uuid::new_v4();
+        let fuel = BusinessEvent::Expense(Expense {
+            id,
+            business_id,
+            description: "fuel".into(),
+            amount: CurrencyAmount::new(500.0, "KES"),
+            category: None,
+            occurred_at: Utc::now(),
+            recurring: None,
+            source_channel: SourceChannel::Telegram,
+            raw_text: None,
+            reimburse: Some(true),
+        });
+        store.save_event_by(&fuel, Some(&mary)).await.unwrap();
+        let tag = format!("fuel (Guss {})", &id.to_string()[..8]);
+        Mock::given(method("GET"))
+            .and(path("/api/minions/expense_claims"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!([{"id": "c-9", "description": tag, "status": "submitted"}]),
+                ),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/minions/expense_claims"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "c-9"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/minions/expense_claims/c-9/withdraw"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "c-9"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = FridayClient::new(server.uri(), KEY);
+        sync_once(&store, &client, &shop(business_id))
+            .await
+            .unwrap();
+        let number = store.journal(business_id, 1).await.unwrap()[0].number;
+        let entry = store
+            .journal_entry(business_id, number)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .void_event(entry.event.id(), &mary, "wrong")
+            .await
+            .unwrap();
+        sync_once(&store, &client, &shop(business_id))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
