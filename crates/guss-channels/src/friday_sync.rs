@@ -1055,6 +1055,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_link_from_friday_is_redeemed_with_the_service_key() {
+        let server = friday("write").await;
+        Mock::given(method("POST"))
+            .and(path("/guss/svc/redeem"))
+            .and(header("authorization", format!("Bearer {KEY}").as_str()))
+            .and(body_partial_json(
+                json!({"code": "AbC_9", "telegram_id": 7}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"guss_role": "owner"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/guss/svc/bot"))
+            .and(body_partial_json(json!({"username": "DukaGussBot"})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(client.redeem("AbC_9", 7, "Fire").await.unwrap(), "owner");
+        client.report_bot("DukaGussBot").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn widget_entries_act_as_the_friday_user_who_typed_them() {
         let server = friday("write").await;
         Mock::given(method("POST"))
