@@ -264,9 +264,12 @@ async fn main() {
             tracing::warn!("{e}; asking before saving other currencies");
             OtherCurrencyPolicy::Ask
         });
-    let orchestrator = Arc::new(
-        Orchestrator::new(nlu, store, business).with_other_currency_policy(other_currency_policy),
-    );
+    let mut orchestrator =
+        Orchestrator::new(nlu, store, business).with_other_currency_policy(other_currency_policy);
+    if let Some(f) = friday.clone() {
+        orchestrator = orchestrator.with_step_up(f);
+    }
+    let orchestrator = Arc::new(orchestrator);
 
     match config.web.token.as_deref().map(str::trim) {
         Some(token) if token.len() >= 24 => {

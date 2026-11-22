@@ -222,6 +222,9 @@ pub struct Orchestrator<P: LlmProvider, S: Store> {
     held: Mutex<HashMap<String, Held>>,
     /// The item last scanned in each chat (plan 16.3), for "sold 2".
     scanned: Mutex<HashMap<String, (DateTime<Utc>, String)>>,
+    /// Friday, for step-up checks on large returns (plan 16.4); None
+    /// without Friday (nothing to check against).
+    step_up: Option<Arc<crate::friday::FridayClient>>,
 }
 
 impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
@@ -234,7 +237,14 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             other_currency_policy: OtherCurrencyPolicy::default(),
             held: Mutex::new(HashMap::new()),
             scanned: Mutex::new(HashMap::new()),
+            step_up: None,
         }
+    }
+
+    /// Large customer returns need the person's passkey (plan 16.4).
+    pub fn with_step_up(mut self, friday: Arc<crate::friday::FridayClient>) -> Self {
+        self.step_up = Some(friday);
+        self
     }
 
     pub fn with_other_currency_policy(mut self, policy: OtherCurrencyPolicy) -> Self {
@@ -488,6 +498,9 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         if let Some(reply) = self.price_returns(&mut events, language).await? {
             return Ok(reply);
         }
+        if let Some(reply) = self.return_step_up(actor, &events, home).await {
+            return Ok(reply);
+        }
         // First, so the later "keep" answers can save straight away.
         // Who paid varies person to person (owner, 2026-11-22): the owner's
         // unsaid means the business; anyone else is asked.
@@ -537,6 +550,44 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 Ok(reply)
             }
         }
+    }
+
+    /// A customer return (refund) worth more than the step-up limit, from
+    /// someone on Telegram with Friday connected: Some(the link to confirm
+    /// with their passkey); the same message again goes through once done.
+    async fn return_step_up(
+        &self,
+        actor: &Actor,
+        events: &[BusinessEvent],
+        home: &str,
+    ) -> Option<String> {
+        let friday = self.step_up.as_ref()?;
+        let telegram_id: i64 = actor.id.strip_prefix("telegram:")?.parse().ok()?;
+        let big: Vec<&Sale> = events
+            .iter()
+            .filter_map(|e| match e {
+                BusinessEvent::Sale(s) if s.quantity < 0.0 => Some(s),
+                _ => None,
+            })
+            .filter(|s| crate::step_up::needed(Some(&s.total()), home))
+            .collect();
+        if big.is_empty() {
+            return None;
+        }
+        let what = big
+            .iter()
+            .map(|s| format!("{} x{} ({})", s.item_name, -s.quantity, s.total()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let key = format!("return:{what}");
+        crate::step_up::gate(
+            friday,
+            &actor.id,
+            telegram_id,
+            &key,
+            &format!("Return: {what}"),
+        )
+        .await
     }
 
     /// The same sale or restock (item, quantity, price) recorded by someone
@@ -1750,6 +1801,73 @@ mod tests {
                 .pop_front()
                 .expect("a reply for every message"))
         }
+    }
+
+    #[tokio::test]
+    async fn a_large_return_waits_for_the_persons_passkey() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/guss/svc/step-up"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"id": "su-r", "link": "https://friday.example/step-up?c=r"}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/guss/svc/step-up/su-r"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"done": true})))
+            .mount(&server)
+            .await;
+        let tv_return = json!({"events": [{"kind": "return", "item_name": "tv", "quantity": 1.0}]});
+        let replies = [
+            json!({"events": [{"kind": "sale", "item_name": "tv", "quantity": 1.0, "unit_price_major": 30000.0}]}),
+            tv_return.clone(),
+            tv_return,
+        ];
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let business = BusinessProfile {
+            id: Uuid::new_v4(),
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+        };
+        let o = Orchestrator::new(
+            Nlu::new(QueueProvider(std::sync::Mutex::new(replies.into())), "en"),
+            store,
+            business,
+        )
+        .with_step_up(Arc::new(crate::friday::FridayClient::new(
+            server.uri(),
+            "fgs_key",
+        )));
+        let boss = Actor::new("telegram:5", "Boss", guss_core::people::Role::Owner);
+        let say = |text: &'static str| {
+            let (o, boss) = (&o, &boss);
+            async move {
+                o.handle_message_as(boss, "chat", SourceChannel::Telegram, text)
+                    .await
+                    .unwrap()
+            }
+        };
+        say("sold a tv at 30000").await;
+        let asked = say("returned the tv").await;
+        assert!(
+            asked.contains("https://friday.example/step-up?c=r"),
+            "{asked}"
+        );
+        assert_eq!(
+            o.store.journal(o.business.id, 10).await.unwrap().len(),
+            1,
+            "nothing saved yet"
+        );
+        say("returned the tv").await; // after confirming
+        assert_eq!(o.store.journal(o.business.id, 10).await.unwrap().len(), 2);
     }
 
     #[tokio::test]

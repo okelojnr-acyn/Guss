@@ -512,9 +512,16 @@ fn manager_commands(language: &str) -> Vec<BotCommand> {
 
 /// Gives an owner's or manager's own chat their fuller menu. Logged, never
 /// fatal: commands are checked by role whatever the menu shows.
-pub async fn apply_manager_menu(bot: &Bot, chat_id: ChatId, language: &str) {
+/// Owners and managers get everything; team leaders the approvals too
+/// (/pending), without the Friday tools.
+pub async fn apply_manager_menu(bot: &Bot, chat_id: ChatId, language: &str, role: Role) {
+    let cmds = if role >= Role::Manager {
+        manager_commands(language)
+    } else {
+        commands(language)
+    };
     let res = bot
-        .set_my_commands(manager_commands(language))
+        .set_my_commands(cmds)
         .scope(teloxide::types::BotCommandScope::Chat {
             chat_id: teloxide::types::Recipient::Id(chat_id),
         })

@@ -1,7 +1,7 @@
 //! Step-up checks (plan 16.4): before a sensitive action, the person
 //! confirms it's them with their own passkey on a one-time Friday link,
 //! then sends the same command again.
-// shortcut: the open checks live in memory; a restart just asks for a new link.
+// shortcut: the open checks live in memory, so a restart just asks for a new link; keep them in the store if restarts mid-check become common.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
