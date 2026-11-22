@@ -169,8 +169,7 @@ where
                 tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(e) =
-                        handle_message(&orchestrator, &voice, &bot, &access, friday.as_deref(), msg)
-                            .await
+                        handle_message(&orchestrator, &voice, &bot, &access, friday, msg).await
                     {
                         tracing::warn!(error = %e, "failed to handle Telegram message");
                     }
@@ -327,8 +326,48 @@ async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
             return format!("Scanned: {code} (Friday didn't answer; try again)");
         }
     };
+    if mode == Mode::Sell {
+        // Ask how the customer pays: cash, or an M-Pesa prompt to their phone.
+        let (events, problems) = scan::events(mode, &products, &codes, business);
+        if events.is_empty() {
+            return problems.join("\n");
+        }
+        let lines = scan::sale_lines(&products, &codes);
+        let amount_cents: i64 = events
+            .iter()
+            .map(|e| match e {
+                guss_core::domain::BusinessEvent::Sale(s) => s.total().amount.minor_units,
+                _ => 0,
+            })
+            .sum();
+        let currency = business.default_currency.trim().to_uppercase();
+        let total =
+            guss_core::money::CurrencyAmount::new(amount_cents as f64 / 100.0, currency.as_str());
+        let mut reply: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                format!(
+                    "{} x{}",
+                    l["description"].as_str().unwrap_or("?"),
+                    l["quantity"]
+                )
+            })
+            .collect();
+        reply.extend(problems);
+        reply.push(crate::basket::say::question(&total.to_string(), language));
+        crate::basket::hold(
+            conversation_key,
+            crate::basket::Basket {
+                events,
+                lines,
+                amount_cents,
+                currency,
+            },
+        );
+        return reply.join("\n");
+    }
     if mode != Mode::Check {
-        // Sell or Stock in: record the batch, with the usual confirmation and undo.
+        // Stock in: record the batch, with the usual confirmation and undo.
         let (events, problems) = scan::events(mode, &products, &codes, business);
         let mut reply = problems.join("\n");
         if !events.is_empty() {
@@ -363,18 +402,133 @@ async fn scanned<P: guss_llm::LlmProvider, S: guss_core::store::Store>(
     }
 }
 
+fn with_paid_by(
+    events: Vec<guss_core::domain::BusinessEvent>,
+    how: &str,
+) -> Vec<guss_core::domain::BusinessEvent> {
+    events
+        .into_iter()
+        .map(|e| match e {
+            guss_core::domain::BusinessEvent::Sale(mut s) => {
+                s.paid_by = Some(how.to_string());
+                guss_core::domain::BusinessEvent::Sale(s)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// Has Friday send the customer the M-Pesa prompt for the basket, then
+/// watches the sale for three minutes: paid -> recorded in Guss (already in
+/// Friday) and said in the chat; not paid -> cancelled in Friday (a late
+/// payment is refunded) and the basket waits for cash or another number.
+#[allow(clippy::too_many_arguments)]
+async fn mpesa_prompt<P, S>(
+    orchestrator: Arc<Orchestrator<P, S>>,
+    friday: Arc<FridayClient>,
+    bot: Bot,
+    chat_id: ChatId,
+    actor: Actor,
+    conversation_key: String,
+    basket: crate::basket::Basket,
+    phone: String,
+    language: String,
+) -> String
+where
+    P: LlmProvider + Send + Sync + 'static,
+    S: Store + Send + Sync + 'static,
+{
+    use crate::basket::say;
+    let token = match friday.token_for_actor(&actor.id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return telegram_ux::link_first(&language, &orchestrator.business().name),
+        Err(e) => return format!("Friday didn't answer ({e}); try again."),
+    };
+    let first = basket.events.first().map(|e| e.id()).unwrap_or_default();
+    let body = serde_json::json!({
+        "channel": "guss",
+        "client_sale_id": format!("guss:{first}"),
+        "currency": basket.currency,
+        "amount_cents": basket.amount_cents,
+        "lines": basket.lines,
+        "phone": phone,
+    });
+    let started = match friday
+        .post(&token, "/api/invoicing/pos/sales/pay-with-paystack", &body)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // Wrong number, no Paystack, no cashier job: say Friday's reason; keep the basket.
+            crate::basket::hold(&conversation_key, basket);
+            return format!("{e}");
+        }
+    };
+    let invoice_id = started["invoice_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let prompt = started["prompt"].as_str().unwrap_or("Sent.").to_string();
+    let total = guss_core::money::CurrencyAmount::new(
+        basket.amount_cents as f64 / 100.0,
+        basket.currency.as_str(),
+    );
+    let reply = say::sent(&prompt, &language);
+    tokio::spawn(async move {
+        let status_path = format!("/api/invoicing/pos/sales/{invoice_id}/status");
+        for _ in 0..36 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let status = match friday.get(&token, &status_path).await {
+                Ok(v) => v["status"].as_str().unwrap_or_default().to_string(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "couldn't check an M-Pesa prompt");
+                    continue;
+                }
+            };
+            if status == "paid" {
+                let events = with_paid_by(basket.events, crate::friday_sync::PAID_THROUGH_FRIDAY);
+                let saved = orchestrator
+                    .record_paid(&actor, &conversation_key, events)
+                    .await
+                    .unwrap_or_else(|e| e.user_message(&language));
+                let _ = send_text(
+                    &bot,
+                    chat_id,
+                    &format!("{}\n{saved}", say::paid(&total.to_string(), &language)),
+                )
+                .await;
+                return;
+            }
+            if status == "void" {
+                break;
+            }
+        }
+        let _ = friday
+            .post(
+                &token,
+                &format!("/api/invoicing/pos/sales/{invoice_id}/cancel"),
+                &serde_json::json!({}),
+            )
+            .await;
+        crate::basket::hold(&conversation_key, basket);
+        let _ = send_text(&bot, chat_id, say::not_paid(&language)).await;
+    });
+    reply
+}
+
 async fn handle_message<P, S>(
-    orchestrator: &Orchestrator<P, S>,
+    orchestrator: &Arc<Orchestrator<P, S>>,
     voice: &VoiceSupport,
     bot: &Bot,
     access: &TelegramAccess,
-    friday: Option<&FridayClient>,
+    friday_arc: Option<Arc<FridayClient>>,
     msg: teloxide::types::Message,
 ) -> Result<(), TelegramError>
 where
-    P: LlmProvider,
-    S: Store,
+    P: LlmProvider + Send + Sync + 'static,
+    S: Store + Send + Sync + 'static,
 {
+    let friday = friday_arc.as_deref();
     let chat_id = msg.chat.id;
     let conversation_key = chat_id.0.to_string();
     let provider_message_id = msg.id.0.to_string();
@@ -491,6 +645,54 @@ where
         .await;
         send_text(bot, chat_id, &reply).await?;
         return Ok(());
+    }
+
+    // The answer to "cash or M-Pesa number?" after a scanned Sell basket.
+    if crate::basket::waiting(&conversation_key)
+        && let Some(text) = msg.text()
+    {
+        use crate::basket::{Answer, say};
+        let answer = crate::basket::answer(text);
+        let basket = crate::basket::take(&conversation_key);
+        match (answer, basket) {
+            (Answer::Other, _) | (_, None) => {
+                send_text(bot, chat_id, say::lapsed(&language)).await?;
+            }
+            (Answer::Cancel, Some(_)) => {
+                send_text(bot, chat_id, say::dropped(&language)).await?;
+                return Ok(());
+            }
+            (Answer::Cash, Some(b)) => {
+                let events = with_paid_by(b.events, "cash");
+                let reply = orchestrator
+                    .record(&actor, &conversation_key, events)
+                    .await
+                    .unwrap_or_else(|e| e.user_message(&language));
+                send_text(bot, chat_id, &reply).await?;
+                return Ok(());
+            }
+            (Answer::Phone(phone), Some(b)) => {
+                let reply = match friday_arc.clone() {
+                    Some(f) => {
+                        mpesa_prompt(
+                            orchestrator.clone(),
+                            f,
+                            bot.clone(),
+                            chat_id,
+                            actor.clone(),
+                            conversation_key.clone(),
+                            b,
+                            phone,
+                            language.clone(),
+                        )
+                        .await
+                    }
+                    None => telegram_ux::link_unavailable(&language).to_string(),
+                };
+                send_text(bot, chat_id, &reply).await?;
+                return Ok(());
+            }
+        }
     }
 
     match command {
@@ -959,7 +1161,7 @@ mod tests {
             .await;
 
         let bot = Bot::new("TEST_TOKEN").set_api_url(server.uri().parse().unwrap());
-        let orchestrator = test_orchestrator().await;
+        let orchestrator = Arc::new(test_orchestrator().await);
         let voice = VoiceSupport::default();
 
         let message: Message =
@@ -998,7 +1200,7 @@ mod tests {
             .mount(&server)
             .await;
         let bot = Bot::new("TEST_TOKEN").set_api_url(server.uri().parse().unwrap());
-        let orchestrator = test_orchestrator().await;
+        let orchestrator = Arc::new(test_orchestrator().await);
         let access = TelegramAccess {
             manager_user_ids: vec![],
             owner_chat_id: Some(10),
@@ -1038,7 +1240,7 @@ mod tests {
             .mount(&server)
             .await;
         let bot = Bot::new("TEST_TOKEN").set_api_url(server.uri().parse().unwrap());
-        let orchestrator = test_orchestrator().await;
+        let orchestrator = Arc::new(test_orchestrator().await);
         let access = TelegramAccess {
             manager_user_ids: vec![],
             owner_chat_id: Some(42),

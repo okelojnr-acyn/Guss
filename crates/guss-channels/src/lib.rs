@@ -1,6 +1,7 @@
 // Step-up checks (plan 16.4); its own group so it merges cleanly.
 pub mod step_up;
 
+pub mod basket;
 pub mod cli;
 pub mod friday;
 pub mod friday_sync;

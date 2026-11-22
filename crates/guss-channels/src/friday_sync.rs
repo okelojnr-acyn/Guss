@@ -32,6 +32,10 @@ use crate::friday::{FridayClient, FridayError};
 use crate::items::normalize_name;
 
 pub const SYNC_EVERY: Duration = Duration::from_secs(30);
+
+/// A sale's `paid_by` when Friday itself took the money (a scanned basket
+/// paid by an M-Pesa prompt): Friday already has the sale, so sync skips it.
+pub const PAID_THROUGH_FRIDAY: &str = "paystack";
 const BATCH: i64 = 50;
 
 /// Accounting accounts Guss books into (Friday's starter chart, plus one
@@ -284,6 +288,12 @@ async fn push(
     item: &SyncItem,
 ) -> Result<(), Failure> {
     let entry = &item.entry;
+    if let BusinessEvent::Sale(s) = &entry.event
+        && s.paid_by.as_deref() == Some(PAID_THROUGH_FRIDAY)
+    {
+        // shortcut: voiding it in Guss doesn't refund it; refunds go through the till or Paystack.
+        return Ok(());
+    }
     let sale = match &entry.event {
         BusinessEvent::Sale(s) => Some(s),
         _ => None,
@@ -1228,6 +1238,31 @@ mod tests {
         );
         // Only stopped entries: a second resend changes nothing.
         assert!(!store.resend(business_id, number).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_sale_friday_already_took_the_money_for_is_not_sent_again() {
+        // No sales mock: posting it would fail the round.
+        let server = friday_with(json!({"invoicing": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let BusinessEvent::Sale(mut s) = sale(business_id, "soda", 2.0) else {
+            unreachable!()
+        };
+        s.paid_by = Some(PAID_THROUGH_FRIDAY.into());
+        store
+            .save_event_by(&BusinessEvent::Sale(s), Some(&mary))
+            .await
+            .unwrap();
+        let client = FridayClient::new(server.uri(), KEY);
+        assert_eq!(
+            sync_once(&store, &client, &shop(business_id))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
