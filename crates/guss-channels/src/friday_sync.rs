@@ -470,25 +470,49 @@ async fn push_claim(
         Err(FridayError::Status { status: 404, .. }) => return Ok(()),
         other => other?,
     };
-    if mine.as_array().into_iter().flatten().any(|c| {
+    let existing = mine.as_array().into_iter().flatten().find(|c| {
         c.get("description")
             .and_then(Value::as_str)
             .is_some_and(|d| d.ends_with(&tag))
-    }) {
-        return Ok(());
+    });
+    let claim = match existing {
+        Some(c) => c.clone(),
+        None => {
+            friday
+                .post(
+                    token,
+                    "/api/minions/expense_claims",
+                    &json!({
+                        "description": format!("{} {tag}", x.description),
+                        "amount_cents": (x.amount.major_units() * 100.0).round() as i64,
+                        "currency": x.amount.currency,
+                        "reimburse": true,
+                    }),
+                )
+                .await?
+        }
+    };
+    // The receipt photo sent with it, if Guss still has it.
+    if let (Some(photo), Some(id)) = (
+        crate::receipts::take(x.id),
+        claim.get("id").and_then(Value::as_str),
+    ) {
+        let path = format!("/api/minions/expense_claims/{id}/receipt");
+        match friday
+            .put_bytes(token, &path, "image/jpeg", photo.clone())
+            .await
+        {
+            Ok(_) => {}
+            // An older Minions, or the claim was already decided: the claim stands without it.
+            Err(FridayError::Status { status, .. }) if status < 500 && status != 429 => {
+                tracing::warn!(status, "Minions refused a receipt photo");
+            }
+            Err(e) => {
+                crate::receipts::put_back(x.id, photo);
+                return Err(e.into());
+            }
+        }
     }
-    friday
-        .post(
-            token,
-            "/api/minions/expense_claims",
-            &json!({
-                "description": format!("{} {tag}", x.description),
-                "amount_cents": (x.amount.major_units() * 100.0).round() as i64,
-                "currency": x.amount.currency,
-                "reimburse": true,
-            }),
-        )
-        .await?;
     Ok(())
 }
 
@@ -1248,6 +1272,9 @@ mod tests {
             reimburse: Some(true),
         });
         store.save_event_by(&fuel, Some(&mary)).await.unwrap();
+        // Mary sent the receipt photo with it.
+        crate::receipts::hold("chat-mary", vec![0xFF, 0xD8, 0xFF]);
+        crate::receipts::attach("chat-mary", &[id]);
 
         Mock::given(method("GET"))
             .and(path("/api/accounting/journal_entries"))
@@ -1298,6 +1325,13 @@ mod tests {
                 "amount_cents": 250000, "currency": "KES", "reimburse": true
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "c-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/minions/expense_claims/c-1/receipt"))
+            .and(header("content-type", "image/jpeg"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "c-1"})))
             .expect(1)
             .mount(&server)
             .await;

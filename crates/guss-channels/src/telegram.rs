@@ -473,11 +473,34 @@ where
                 return Ok(());
             }
         }
+    } else if let Some(sizes) = msg.photo() {
+        // A receipt: it goes with the pay-me-back expense in its caption,
+        // or in the next message.
+        match download_photo(bot, sizes).await {
+            Ok(jpeg) => crate::receipts::hold(&conversation_key, jpeg),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't download a receipt photo");
+                send_text(bot, chat_id, "Couldn't get that photo; send it again.").await?;
+                return Ok(());
+            }
+        }
+        match msg.caption().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(caption) => caption.to_string(),
+            None => {
+                send_text(
+                    bot,
+                    chat_id,
+                    crate::journal_texts::receipt_waiting(&language),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
     } else {
         send_text(
             bot,
             chat_id,
-            "I can only read text or voice notes right now.",
+            "I can only read text, voice notes or receipt photos right now.",
         )
         .await?;
         return Ok(());
@@ -505,6 +528,10 @@ where
     let Some(reply_text) = reply else {
         return Ok(()); // redelivered update, already handled
     };
+    crate::receipts::attach(
+        &conversation_key,
+        &orchestrator.just_saved_pay_back(&conversation_key).await,
+    );
 
     send_text(bot, chat_id, &reply_text).await?;
 
@@ -531,6 +558,35 @@ where
     }
 
     Ok(())
+}
+
+/// The largest size of a photo Telegram offers under 1 MB (Friday's limit), as JPEG bytes.
+async fn download_photo(
+    bot: &Bot,
+    sizes: &[teloxide::types::PhotoSize],
+) -> Result<Vec<u8>, TelegramError> {
+    let best = sizes
+        .iter()
+        .filter(|p| p.file.size <= 1024 * 1024)
+        .max_by_key(|p| p.width * p.height)
+        .ok_or_else(|| TelegramError::Api("the photo is too large".into()))?;
+    let file = bot
+        .get_file(best.file.id.clone())
+        .await
+        .map_err(|e| TelegramError::Api(e.to_string()))?;
+    let url = format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        bot.token(),
+        file.path
+    );
+    let bytes = reqwest::get(&url)
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| TelegramError::Api(e.without_url().to_string()))?
+        .bytes()
+        .await
+        .map_err(|e| TelegramError::Api(e.without_url().to_string()))?;
+    Ok(bytes.to_vec())
 }
 
 async fn transcribe_voice_note(

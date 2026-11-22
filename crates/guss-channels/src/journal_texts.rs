@@ -519,3 +519,13 @@ pub fn who_paid_answer(text: &str) -> Option<bool> {
         None
     }
 }
+
+/// A receipt photo without a caption.
+pub fn receipt_waiting(language: &str) -> &'static str {
+    pick(
+        language,
+        "Got the receipt. Now tell me the expense, e.g. \"fuel 2500, I paid\".",
+        "Struk diterima. Sekarang sebutkan pengeluarannya, mis. \"bensin 25000, pakai uang saya\".",
+        "Risiti imepokelewa. Sasa niambie matumizi, mf. \"mafuta 2500, nimelipa mimi\".",
+    )
+}

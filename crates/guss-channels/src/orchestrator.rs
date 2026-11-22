@@ -202,6 +202,9 @@ struct PendingCommit {
     /// In confirmation order; None once that line was undone.
     event_ids: Vec<Option<Uuid>>,
     committed_at: DateTime<Utc>,
+    /// Expenses the person paid and wants back (their receipt photo goes
+    /// with the first).
+    pay_back: Vec<Uuid>,
 }
 
 /// Ties NLU extraction, storage, and report rendering together behind one
@@ -661,11 +664,30 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                 PendingCommit {
                     event_ids: ids.into_iter().map(Some).collect(),
                     committed_at: Utc::now(),
+                    pay_back: events
+                        .iter()
+                        .filter_map(|e| match e {
+                            BusinessEvent::Expense(x) if x.reimburse == Some(true) => Some(x.id),
+                            _ => None,
+                        })
+                        .collect(),
                 },
             );
         }
 
         Ok(confirmation_reply(&lines, &self.business.language))
+    }
+
+    /// Pay-me-back expenses saved in this conversation in the last minute
+    /// (for the receipt photo that came with them).
+    pub async fn just_saved_pay_back(&self, conversation_key: &str) -> Vec<Uuid> {
+        self.pending
+            .lock()
+            .await
+            .get(conversation_key)
+            .filter(|p| Utc::now() - p.committed_at <= Duration::minutes(1))
+            .map(|p| p.pay_back.clone())
+            .unwrap_or_default()
     }
 
     /// Undoes the last confirmation: all of it, or only the numbered
