@@ -1278,66 +1278,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voiding_a_pay_me_back_expense_withdraws_its_waiting_claim() {
-        let server = friday_with(json!({"minions": "write"})).await;
-        let business_id = Uuid::new_v4();
-        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
-        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
-        let id = Uuid::new_v4();
-        let fuel = BusinessEvent::Expense(Expense {
-            id,
-            business_id,
-            description: "fuel".into(),
-            amount: CurrencyAmount::new(500.0, "KES"),
-            category: None,
-            occurred_at: Utc::now(),
-            recurring: None,
-            source_channel: SourceChannel::Telegram,
-            raw_text: None,
-            reimburse: Some(true),
-        });
-        store.save_event_by(&fuel, Some(&mary)).await.unwrap();
-        let tag = format!("fuel (Guss {})", &id.to_string()[..8]);
-        Mock::given(method("GET"))
-            .and(path("/api/minions/expense_claims"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    json!([{"id": "c-9", "description": tag, "status": "submitted"}]),
-                ),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/api/minions/expense_claims"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "c-9"})))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/api/minions/expense_claims/c-9/withdraw"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "c-9"})))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = FridayClient::new(server.uri(), KEY);
-        sync_once(&store, &client, &shop(business_id))
-            .await
-            .unwrap();
-        let number = store.journal(business_id, 1).await.unwrap()[0].number;
-        let entry = store
-            .journal_entry(business_id, number)
-            .await
-            .unwrap()
-            .unwrap();
-        store
-            .void_event(entry.event.id(), &mary, "wrong")
-            .await
-            .unwrap();
-        sync_once(&store, &client, &shop(business_id))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
     async fn friday_down_keeps_entries_queued() {
         let business_id = Uuid::new_v4();
         let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
@@ -1450,6 +1390,66 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn voiding_a_pay_me_back_expense_withdraws_its_waiting_claim() {
+        let server = friday_with(json!({"minions": "write"})).await;
+        let business_id = Uuid::new_v4();
+        let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+        let mary = Actor::new("telegram:7", "Mary", Role::Staff);
+        let id = Uuid::new_v4();
+        let fuel = BusinessEvent::Expense(Expense {
+            id,
+            business_id,
+            description: "fuel".into(),
+            amount: CurrencyAmount::new(500.0, "KES"),
+            category: None,
+            occurred_at: Utc::now(),
+            recurring: None,
+            source_channel: SourceChannel::Telegram,
+            raw_text: None,
+            reimburse: Some(true),
+        });
+        store.save_event_by(&fuel, Some(&mary)).await.unwrap();
+        let tag = format!("fuel (Guss {})", &id.to_string()[..8]);
+        Mock::given(method("GET"))
+            .and(path("/api/minions/expense_claims"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!([{"id": "c-9", "description": tag, "status": "submitted"}]),
+                ),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/minions/expense_claims"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "c-9"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/minions/expense_claims/c-9/withdraw"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "c-9"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = FridayClient::new(server.uri(), KEY);
+        sync_once(&store, &client, &shop(business_id))
+            .await
+            .unwrap();
+        let number = store.journal(business_id, 1).await.unwrap()[0].number;
+        let entry = store
+            .journal_entry(business_id, number)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .void_event(entry.event.id(), &mary, "wrong")
+            .await
+            .unwrap();
+        sync_once(&store, &client, &shop(business_id))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
