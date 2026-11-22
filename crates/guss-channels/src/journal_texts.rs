@@ -467,3 +467,19 @@ pub fn return_of_credit_sale(item: &str, customer: &str, language: &str) -> Stri
         ),
     }
 }
+
+/// A team leader asked to decide for someone outside their team, or above
+/// their limit.
+pub fn team_leader_cannot(limit: &str, language: &str) -> String {
+    match lang(language) {
+        Lang::Id => format!(
+            "Ketua tim hanya memutuskan permintaan dari timnya sendiri, sampai {limit} per catatan. Pemilik atau manajer yang memutuskan ini."
+        ),
+        Lang::Sw => format!(
+            "Kiongozi wa timu huamua maombi ya timu yake tu, hadi {limit} kwa kila rekodi. Mwenye duka au meneja ataamua hili."
+        ),
+        Lang::En => format!(
+            "Team leaders decide requests from their own team, up to {limit} per entry. The owner or a manager decides this one."
+        ),
+    }
+}

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use guss_core::domain::{BusinessEvent, BusinessProfile, Sale, SourceChannel};
 use guss_core::money::CurrencyAmount;
-use guss_core::people::{Action, Actor};
+use guss_core::people::{Action, Actor, Role, TEAM_LEADER_LIMIT_MAJOR};
 use guss_core::store::{JournalEntry, Store, StoreError, TimeWindow};
 use guss_insights::{build_report, compute_report, render_report};
 use guss_llm::LlmProvider;
@@ -125,8 +125,9 @@ impl Outcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notify {
-    /// Everyone who can decide void requests (owner and managers).
-    Approvers(String),
+    /// Everyone who can decide a void request from `from` (an actor id):
+    /// the owner and managers, and `from`'s team leader.
+    Approvers { from: String, text: String },
     /// One person, by actor id ("telegram:12345").
     Person(String, String),
 }
@@ -866,13 +867,10 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             .await?;
         Ok(Outcome {
             reply: texts::void_requested(number, language),
-            notify: vec![Notify::Approvers(texts::void_request_notice(
-                &actor.name,
-                request,
-                &line,
-                reason,
-                language,
-            ))],
+            notify: vec![Notify::Approvers {
+                from: actor.id.clone(),
+                text: texts::void_request_notice(&actor.name, request, &line, reason, language),
+            }],
         })
     }
 
@@ -903,7 +901,10 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         if !actor.role.can(Action::DecideVoids) {
             return Ok(texts::not_allowed(language).into());
         }
-        let pending = self.store.pending_void_requests(self.business.id).await?;
+        let mut pending = self.store.pending_void_requests(self.business.id).await?;
+        if actor.role == Role::TeamLeader {
+            pending.retain(|r| actor.team.contains(&r.requested_by_id));
+        }
         if pending.is_empty() {
             return Ok(texts::nothing_pending(language).into());
         }
@@ -946,10 +947,25 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         let author_role = entry.as_ref().and_then(|e| e.recorded_by_role);
         // No approving your own request, and no overruling the owner.
         let own = request.requested_by_id == actor.id;
-        if (own && actor.role != guss_core::people::Role::Owner)
-            || !actor.role.outranks_for_voids(author_role)
-        {
+        if (own && actor.role != Role::Owner) || !actor.role.outranks_for_voids(author_role) {
             return Ok(Outcome::reply(texts::not_allowed(language)));
+        }
+        if actor.role == Role::TeamLeader {
+            let home = self.home_currency();
+            // No money in it (a note, a restock without a cost): within.
+            let within = entry.as_ref().is_some_and(|e| {
+                event_value(&e.event).is_none_or(|v| {
+                    v.currency.trim().eq_ignore_ascii_case(&home)
+                        && v.major_units().abs() <= TEAM_LEADER_LIMIT_MAJOR
+                })
+            });
+            if !actor.team.contains(&request.requested_by_id) || !within {
+                let limit = CurrencyAmount::new(TEAM_LEADER_LIMIT_MAJOR, home.as_str());
+                return Ok(Outcome::reply(texts::team_leader_cannot(
+                    &limit.to_string(),
+                    language,
+                )));
+            }
         }
         self.store
             .decide_void_request(self.business.id, number, actor, approve)
@@ -986,7 +1002,11 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             .await?
             .into_iter()
             .filter(|e| {
-                e.voided.is_none() && e.recorded_by_id.as_deref() == Some(actor.id.as_str())
+                // Team leaders: theirs and their team's (plan 12.3).
+                e.voided.is_none()
+                    && e.recorded_by_id
+                        .as_deref()
+                        .is_some_and(|by| by == actor.id || actor.team.iter().any(|t| t == by))
             })
             .map(|e| e.event)
             .filter(|ev| event_time(ev) >= since)
@@ -1353,6 +1373,20 @@ fn foreign_currencies(events: &[BusinessEvent], home: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// What an entry is worth, for approval limits.
+fn event_value(e: &BusinessEvent) -> Option<CurrencyAmount> {
+    match e {
+        BusinessEvent::Sale(s) => Some(s.total()),
+        BusinessEvent::Expense(x) => Some(x.amount.clone()),
+        BusinessEvent::DebtPayment(d) => Some(d.amount.clone()),
+        BusinessEvent::StockUpdate(su) => su
+            .unit_cost
+            .as_ref()
+            .map(|c| CurrencyAmount::new(su.delta * c.major_units(), c.currency.as_str())),
+        BusinessEvent::Note(_) => None,
+    }
 }
 
 /// Same numbers, recorded in `currency` (the owner said the amount was in
@@ -1981,7 +2015,7 @@ mod tests {
             asked.reply
         );
         match &asked.notify[..] {
-            [Notify::Approvers(text)] => {
+            [Notify::Approvers { text, .. }] => {
                 assert!(
                     text.contains("mary asks to void this entry (request 1)"),
                     "{text}"
@@ -2025,6 +2059,75 @@ mod tests {
         assert_eq!(
             o.pending_voids(&joe).await.unwrap(),
             "No void requests are waiting."
+        );
+    }
+
+    #[tokio::test]
+    async fn team_leaders_decide_their_teams_requests_within_the_limit() {
+        use guss_core::people::Role;
+        // 3 rice at 120 = 360 KES: within the 2,000 KES limit.
+        let o = orchestrator(kes_sale(), "en", OtherCurrencyPolicy::Ask).await;
+        let mary = person("mary", Role::Staff);
+        let ann = person("ann", Role::Staff);
+        let lead = person("tl", Role::TeamLeader).with_team(vec!["telegram:mary".into()]);
+        record_as(&o, &mary).await;
+        record_as(&o, &ann).await;
+        // Same sale twice from two people: Ann confirms hers is another one.
+        o.handle_message_as(&ann, &ann.id, SourceChannel::Telegram, "yes")
+            .await
+            .unwrap();
+        let journal = o.store.journal(o.business.id, 2).await.unwrap();
+        let (anns, marys) = (journal[0].number, journal[1].number);
+        o.void_entry(&mary, marys, "typo").await.unwrap();
+        o.void_entry(&ann, anns, "typo").await.unwrap();
+
+        // Only their team's request is listed, and only it can be decided.
+        let list = o.pending_voids(&lead).await.unwrap();
+        assert!(
+            list.contains("from mary") && !list.contains("from ann"),
+            "{list}"
+        );
+        let nope = o.decide_void(&lead, 2, true).await.unwrap();
+        assert!(
+            nope.reply
+                .starts_with("Team leaders decide requests from their own team, up to 2000.00 KES"),
+            "{}",
+            nope.reply
+        );
+        let done = o.decide_void(&lead, 1, true).await.unwrap();
+        assert!(done.reply.starts_with("Approved"), "{}", done.reply);
+        // Team leaders still can't void directly.
+        let asked = o.void_entry(&lead, anns, "x").await.unwrap();
+        assert!(asked.reply.starts_with("Asked for"), "{}", asked.reply);
+    }
+
+    #[tokio::test]
+    async fn team_leaders_cannot_approve_above_their_limit() {
+        use guss_core::people::Role;
+        let big = json!({"events": [{"kind": "sale", "item_name": "tv", "quantity": 1.0,
+            "unit_price_major": 30000.0, "currency": null, "category": null}]});
+        let o = orchestrator(big, "en", OtherCurrencyPolicy::Ask).await;
+        let mary = person("mary", Role::Staff);
+        let lead = person("tl", Role::TeamLeader).with_team(vec!["telegram:mary".into()]);
+        o.handle_message_as(&mary, &mary.id, SourceChannel::Telegram, "sold a tv")
+            .await
+            .unwrap();
+        let entry = o.store.journal(o.business.id, 1).await.unwrap()[0].number;
+        o.void_entry(&mary, entry, "wrong").await.unwrap();
+        let nope = o.decide_void(&lead, 1, true).await.unwrap();
+        assert!(
+            nope.reply
+                .contains("The owner or a manager decides this one."),
+            "{}",
+            nope.reply
+        );
+        let boss = person("boss", Role::Owner);
+        assert!(
+            o.decide_void(&boss, 1, true)
+                .await
+                .unwrap()
+                .reply
+                .starts_with("Approved")
         );
     }
 

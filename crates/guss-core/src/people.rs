@@ -8,9 +8,18 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Staff,
+    /// Friday's team leader: decides the void requests of the people who
+    /// report to them, up to TEAM_LEADER_LIMIT_MAJOR (plan 12.3).
+    #[serde(rename = "team_leader")]
+    TeamLeader,
     Manager,
     Owner,
 }
+
+/// The most a team leader may approve per entry, in the business currency
+/// (Friday's friday_common.access APPROVAL_LIMIT_CENTS: KES 2,000).
+// shortcut: one fixed limit like Friday's; read it from Friday when limits become per business.
+pub const TEAM_LEADER_LIMIT_MAJOR: f64 = 2_000.0;
 
 /// Things a person can ask Guss to do that not everyone may.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,9 +42,8 @@ impl Role {
     pub fn can(self, action: Action) -> bool {
         match action {
             Action::Record | Action::ReportToday | Action::History => true,
-            Action::ReportLonger | Action::VoidDirectly | Action::DecideVoids => {
-                self >= Role::Manager
-            }
+            Action::DecideVoids => self >= Role::TeamLeader,
+            Action::ReportLonger | Action::VoidDirectly => self >= Role::Manager,
         }
     }
 
@@ -45,6 +53,8 @@ impl Role {
         match self {
             Role::Owner => true,
             Role::Manager => author.is_none_or(|a| a <= Role::Manager),
+            // Only staff entries, and only for their team (checked by the caller).
+            Role::TeamLeader => author == Some(Role::Staff),
             Role::Staff => false,
         }
     }
@@ -53,6 +63,7 @@ impl Role {
         match self {
             Role::Owner => "owner",
             Role::Manager => "manager",
+            Role::TeamLeader => "team_leader",
             Role::Staff => "staff",
         }
     }
@@ -61,6 +72,7 @@ impl Role {
         match s {
             "owner" => Some(Role::Owner),
             "manager" => Some(Role::Manager),
+            "team_leader" => Some(Role::TeamLeader),
             "staff" => Some(Role::Staff),
             _ => None,
         }
@@ -74,6 +86,10 @@ pub struct Actor {
     pub id: String,
     pub name: String,
     pub role: Role,
+    /// A team leader's team: the actor ids of the people who report to
+    /// them ("telegram:12345", "friday:<user id>"). Empty for everyone else.
+    #[serde(default)]
+    pub team: Vec<String>,
 }
 
 impl Actor {
@@ -82,7 +98,13 @@ impl Actor {
             id: id.into(),
             name: name.into(),
             role,
+            team: Vec::new(),
         }
+    }
+
+    pub fn with_team(mut self, team: Vec<String>) -> Self {
+        self.team = team;
+        self
     }
 
     /// The single local user of the CLI, or a channel without its own
@@ -114,5 +136,20 @@ mod tests {
         assert!(!Role::Manager.outranks_for_voids(Some(Role::Owner)));
         assert!(Role::Owner.outranks_for_voids(Some(Role::Owner)));
         assert!(!Role::Staff.outranks_for_voids(Some(Role::Staff)));
+        assert!(Role::TeamLeader.outranks_for_voids(Some(Role::Staff)));
+        assert!(!Role::TeamLeader.outranks_for_voids(Some(Role::TeamLeader)));
+        assert!(!Role::TeamLeader.outranks_for_voids(None));
+    }
+
+    #[test]
+    fn team_leaders_decide_but_do_not_void_directly() {
+        assert!(Role::TeamLeader.can(Action::DecideVoids));
+        assert!(!Role::TeamLeader.can(Action::VoidDirectly));
+        assert!(!Role::TeamLeader.can(Action::ReportLonger));
+        assert_eq!(Role::parse("team_leader"), Some(Role::TeamLeader));
+        assert_eq!(
+            serde_json::to_string(&Role::TeamLeader).unwrap(),
+            "\"team_leader\""
+        );
     }
 }
