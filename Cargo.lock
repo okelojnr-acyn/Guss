@@ -1245,13 +1245,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "guss-core",
- "guss-insights",
- "guss-store",
  "thiserror",
  "tokio",
  "tokio-cron-scheduler",
  "tracing",
- "uuid",
 ]
 
 [[package]]
