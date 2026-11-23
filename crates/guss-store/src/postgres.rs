@@ -13,6 +13,8 @@ use crate::event_columns::columns_for;
 
 pub struct PostgresStore {
     pool: PgPool,
+    /// When processed_messages was last trimmed (at most hourly).
+    trimmed: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 fn db_err(e: sqlx::Error) -> StoreError {
@@ -89,7 +91,10 @@ impl PostgresStore {
             .run(&pool)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            trimmed: std::sync::Mutex::new(None),
+        })
     }
 }
 
@@ -560,6 +565,24 @@ impl Store for PostgresStore {
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
+        // Ids only guard against a provider resending a message (minutes,
+        // hours at most); 30 days is plenty and the table stops growing.
+        let due = {
+            let mut last = self.trimmed.lock().expect("not poisoned");
+            let due = last.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3600));
+            if due {
+                *last = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            // A failed trim is retried next hour; recording the message matters more.
+            let _ = sqlx::query("DELETE FROM processed_messages WHERE processed_at < $1")
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await;
+        }
         Ok(result.rows_affected() == 1)
     }
 }
