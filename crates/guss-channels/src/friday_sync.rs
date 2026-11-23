@@ -116,18 +116,16 @@ pub async fn sync_once<S: Store + ?Sized>(
 /// Pay links ("/paylink John") are checked for this many days.
 const PAY_LINK_DAYS: i64 = 14;
 
-/// Is a pay link this old due a check this round? Every round (30 s) for
-/// its first 10 minutes, then every 5 minutes for a day, then hourly:
-/// each check asks Paystack, and most customers pay within minutes.
-fn pay_link_due(age: chrono::Duration) -> bool {
-    let age = age.num_seconds().max(0);
-    let every = match age {
-        a if a < 10 * 60 => return true,
-        a if a < 24 * 3600 => 5 * 60,
-        _ => 3600,
-    };
-    // shortcut: stateless, so a slow round can skip one check (the next comes one interval later).
-    age % every < SYNC_EVERY.as_secs() as i64
+/// How long between checks of a pay link this old: None = every round
+/// (30 s) for its first 10 minutes, then every 5 minutes for a day, then
+/// hourly. Each check may ask Paystack; most customers pay within minutes,
+/// and with Paystack's webhook set Friday already knows (no Paystack call).
+fn pay_link_gap(age: chrono::Duration) -> Option<std::time::Duration> {
+    match age.num_seconds() {
+        a if a < 10 * 60 => None,
+        a if a < 24 * 3600 => Some(std::time::Duration::from_secs(5 * 60)),
+        _ => Some(std::time::Duration::from_secs(3600)),
+    }
 }
 
 /// Asks Friday about each open Paystack pay link: a note "/paylink" left
@@ -159,10 +157,11 @@ pub async fn check_pay_links<S: Store + ?Sized>(
         let Some(reference) = n.paystack_ref.as_deref() else {
             continue;
         };
-        if entry.voided.is_some()
-            || n.occurred_at < since
-            || closed.contains(reference)
-            || !pay_link_due(Utc::now() - n.occurred_at)
+        if entry.voided.is_some() || n.occurred_at < since || closed.contains(reference) {
+            continue;
+        }
+        if let Some(gap) = pay_link_gap(Utc::now() - n.occurred_at)
+            && !friday.claim_check(reference, gap).await
         {
             continue;
         }
@@ -1816,17 +1815,26 @@ mod tests {
         assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
     }
 
-    #[test]
-    fn pay_links_are_checked_less_often_as_they_age() {
-        let rounds_in = |from: i64, to: i64| {
-            (from..to)
-                .step_by(30)
-                .filter(|s| pay_link_due(chrono::Duration::seconds(*s)))
-                .count()
-        };
-        assert_eq!(rounds_in(0, 600), 20, "every round for 10 minutes");
-        assert_eq!(rounds_in(600, 3600), 10, "every 5 minutes after");
-        assert_eq!(rounds_in(86_400, 86_400 + 7200), 2, "hourly after a day");
+    #[tokio::test]
+    async fn pay_links_are_checked_less_often_as_they_age() {
+        let mins = |m: i64| chrono::Duration::minutes(m);
+        assert_eq!(pay_link_gap(mins(9)), None, "every round for 10 minutes");
+        assert_eq!(
+            pay_link_gap(mins(30)),
+            Some(std::time::Duration::from_secs(300))
+        );
+        assert_eq!(
+            pay_link_gap(mins(25 * 60)),
+            Some(std::time::Duration::from_secs(3600))
+        );
+        let client = FridayClient::new("http://unused", KEY);
+        let five = std::time::Duration::from_secs(300);
+        assert!(client.claim_check("ref", five).await);
+        assert!(
+            !client.claim_check("ref", five).await,
+            "checked a moment ago"
+        );
+        assert!(client.claim_check("other", five).await);
     }
 
     #[tokio::test]

@@ -150,6 +150,8 @@ pub struct FridayClient {
     products: Mutex<HashMap<String, (Instant, Arc<Value>)>>,
     /// When `refresh_unless_recent` last asked Friday again.
     last_forced: Mutex<Option<Instant>>,
+    /// When each thing (a pay link) was last checked, for `claim_check`.
+    checked: Mutex<HashMap<String, Instant>>,
 }
 
 impl FridayClient {
@@ -167,7 +169,22 @@ impl FridayClient {
             tokens: Mutex::new(HashMap::new()),
             products: Mutex::new(HashMap::new()),
             last_forced: Mutex::new(None),
+            checked: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// True (and remembered) if `key` wasn't checked in the last `gap`.
+    /// In memory: after a restart each key gets one check at once.
+    pub async fn claim_check(&self, key: &str, gap: Duration) -> bool {
+        let mut checked = self.checked.lock().await;
+        if checked.get(key).is_some_and(|at| at.elapsed() < gap) {
+            return false;
+        }
+        if checked.len() > 10_000 {
+            checked.retain(|_, at| at.elapsed() < Duration::from_secs(3600));
+        }
+        checked.insert(key.to_string(), Instant::now());
+        true
     }
 
     /// Inventory's products as `token` sees them, reused for PRODUCTS_TTL.
