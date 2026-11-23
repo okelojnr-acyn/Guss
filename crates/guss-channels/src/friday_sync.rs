@@ -116,6 +116,20 @@ pub async fn sync_once<S: Store + ?Sized>(
 /// Pay links ("/paylink John") are checked for this many days.
 const PAY_LINK_DAYS: i64 = 14;
 
+/// Is a pay link this old due a check this round? Every round (30 s) for
+/// its first 10 minutes, then every 5 minutes for a day, then hourly:
+/// each check asks Paystack, and most customers pay within minutes.
+fn pay_link_due(age: chrono::Duration) -> bool {
+    let age = age.num_seconds().max(0);
+    let every = match age {
+        a if a < 10 * 60 => return true,
+        a if a < 24 * 3600 => 5 * 60,
+        _ => 3600,
+    };
+    // shortcut: stateless, so a slow round can skip one check (the next comes one interval later).
+    age % every < SYNC_EVERY.as_secs() as i64
+}
+
 /// Asks Friday about each open Paystack pay link: a note "/paylink" left
 /// that no payment has closed yet. Once the customer has paid, it goes in
 /// the journal as "John paid" (by M-Pesa, card or bank), so Guss's own
@@ -145,7 +159,11 @@ pub async fn check_pay_links<S: Store + ?Sized>(
         let Some(reference) = n.paystack_ref.as_deref() else {
             continue;
         };
-        if entry.voided.is_some() || n.occurred_at < since || closed.contains(reference) {
+        if entry.voided.is_some()
+            || n.occurred_at < since
+            || closed.contains(reference)
+            || !pay_link_due(Utc::now() - n.occurred_at)
+        {
             continue;
         }
         let token = match friday
@@ -832,7 +850,7 @@ async fn find_or_create_product(
     track: bool,
 ) -> Result<(String, String), Failure> {
     let wanted = normalize_name(name);
-    let products = friday.get(token, "/api/inventory/products").await?;
+    let products = friday.products(token).await?;
     if let Some(found) = products.as_array().into_iter().flatten().find(|p| {
         p.get("name")
             .and_then(Value::as_str)
@@ -856,6 +874,7 @@ async fn find_or_create_product(
             &json!({"name": name, "kind": "product", "track_inventory": track}),
         )
         .await?;
+    friday.forget_products().await;
     created
         .get("id")
         .and_then(Value::as_str)
@@ -1795,5 +1814,57 @@ mod tests {
             1
         );
         assert!(store.to_sync(business_id, 10).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn pay_links_are_checked_less_often_as_they_age() {
+        let rounds_in = |from: i64, to: i64| {
+            (from..to)
+                .step_by(30)
+                .filter(|s| pay_link_due(chrono::Duration::seconds(*s)))
+                .count()
+        };
+        assert_eq!(rounds_in(0, 600), 20, "every round for 10 minutes");
+        assert_eq!(rounds_in(600, 3600), 10, "every 5 minutes after");
+        assert_eq!(rounds_in(86_400, 86_400 + 7200), 2, "hourly after a day");
+    }
+
+    #[tokio::test]
+    async fn the_product_list_is_fetched_once_per_round_and_again_after_adding_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/inventory/products"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!([{"id": "p1", "name": "Rice"}])),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/inventory/products"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "p2"})))
+            .mount(&server)
+            .await;
+        let client = FridayClient::new(server.uri(), KEY);
+        for _ in 0..3 {
+            assert_eq!(
+                find_or_create_product(&client, TOKEN, "rice", true)
+                    .await
+                    .unwrap()
+                    .0,
+                "p1"
+            );
+        }
+        assert_eq!(
+            find_or_create_product(&client, TOKEN, "Sugar", true)
+                .await
+                .unwrap()
+                .0,
+            "p2"
+        );
+        // Added Sugar: the next lookup reads the list again.
+        find_or_create_product(&client, TOKEN, "rice", true)
+            .await
+            .unwrap();
     }
 }
