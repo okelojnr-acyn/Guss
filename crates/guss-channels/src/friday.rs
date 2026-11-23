@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 
 /// How long Guss trusts its copy of who is linked (and their roles).
 const PEOPLE_TTL: Duration = Duration::from_secs(60);
+/// One sync round (friday_sync::SYNC_EVERY).
+const PRODUCTS_TTL: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Error)]
@@ -143,6 +145,11 @@ pub struct FridayClient {
     people: Mutex<Option<(Instant, Arc<People>)>>,
     /// Keyed by the actor id: "telegram:<id>" or "friday:<user id>".
     tokens: Mutex<HashMap<String, (String, Instant)>>,
+    /// Inventory's product list per token, for one sync round (each entry
+    /// used to download the whole catalogue).
+    products: Mutex<HashMap<String, (Instant, Arc<Value>)>>,
+    /// When `refresh_unless_recent` last asked Friday again.
+    last_forced: Mutex<Option<Instant>>,
 }
 
 impl FridayClient {
@@ -158,7 +165,30 @@ impl FridayClient {
                 .expect("reqwest client builds"),
             people: Mutex::new(None),
             tokens: Mutex::new(HashMap::new()),
+            products: Mutex::new(HashMap::new()),
+            last_forced: Mutex::new(None),
         }
+    }
+
+    /// Inventory's products as `token` sees them, reused for PRODUCTS_TTL.
+    pub async fn products(&self, token: &str) -> Result<Arc<Value>, FridayError> {
+        if let Some((at, list)) = self.products.lock().await.get(token)
+            && at.elapsed() < PRODUCTS_TTL
+        {
+            return Ok(list.clone());
+        }
+        let list = Arc::new(self.get(token, "/api/inventory/products").await?);
+        let mut cache = self.products.lock().await;
+        if cache.len() > 200 {
+            cache.clear();
+        }
+        cache.insert(token.to_string(), (Instant::now(), list.clone()));
+        Ok(list)
+    }
+
+    /// After adding a product, so the next lookup sees it.
+    pub async fn forget_products(&self) {
+        self.products.lock().await.clear();
     }
 
     async fn check(resp: reqwest::Response) -> Result<reqwest::Response, FridayError> {
@@ -323,6 +353,20 @@ impl FridayClient {
         *self.people.lock().await = None;
     }
 
+    /// `refresh` for someone not in the list (they may have just linked),
+    /// at most once per `gap`: a stranger messaging the bot over and over
+    /// can't make every message ask Friday. True if it refreshed.
+    pub async fn refresh_unless_recent(&self, gap: Duration) -> bool {
+        let mut last = self.last_forced.lock().await;
+        if last.is_some_and(|t| t.elapsed() < gap) {
+            return false;
+        }
+        *last = Some(Instant::now());
+        drop(last);
+        self.refresh().await;
+        true
+    }
+
     /// A token to act in Friday as this person; None if they aren't linked.
     pub async fn token_for(&self, telegram_id: i64) -> Result<Option<String>, FridayError> {
         self.token_as(
@@ -465,5 +509,13 @@ mod tests {
         assert_eq!(people.team_leader_of("telegram:2"), Some(1));
         assert_eq!(people.team_leader_of("friday:u-mary"), Some(1));
         assert_eq!(people.team_leader_of("telegram:3"), None);
+    }
+
+    #[tokio::test]
+    async fn forced_refreshes_are_spaced_out() {
+        let client = FridayClient::new("http://unused", "fgs_key");
+        assert!(client.refresh_unless_recent(Duration::from_secs(10)).await);
+        assert!(!client.refresh_unless_recent(Duration::from_secs(10)).await);
+        assert!(client.refresh_unless_recent(Duration::ZERO).await);
     }
 }
