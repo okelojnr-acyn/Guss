@@ -15,6 +15,8 @@ use crate::event_columns::columns_for;
 
 pub struct SqliteStore {
     pool: SqlitePool,
+    /// When processed_messages was last trimmed (at most hourly).
+    trimmed: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 fn db_err(e: sqlx::Error) -> StoreError {
@@ -96,7 +98,10 @@ impl SqliteStore {
             .run(&pool)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            trimmed: std::sync::Mutex::new(None),
+        })
     }
 
     /// A consistent copy of the whole database (SQLite `VACUUM INTO`),
@@ -609,6 +614,24 @@ impl Store for SqliteStore {
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
+        // Ids only guard against a provider resending a message (minutes,
+        // hours at most); 30 days is plenty and the table stops growing.
+        let due = {
+            let mut last = self.trimmed.lock().expect("not poisoned");
+            let due = last.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3600));
+            if due {
+                *last = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            // A failed trim is retried next hour; recording the message matters more.
+            let _ = sqlx::query("DELETE FROM processed_messages WHERE processed_at < ?")
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await;
+        }
         Ok(result.rows_affected() == 1)
     }
 }
@@ -971,5 +994,28 @@ mod tests {
             .unwrap();
         assert!(first, "first delivery should be newly recorded");
         assert!(!second, "redelivery should be detected as already seen");
+    }
+
+    #[tokio::test]
+    async fn old_processed_message_ids_are_trimmed() {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        let old = (Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        sqlx::query("INSERT INTO processed_messages (source, provider_message_id, processed_at) VALUES ('telegram', 'old', ?)")
+            .bind(old)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .mark_message_processed("telegram", "new")
+                .await
+                .unwrap()
+        );
+        let left: Vec<(String,)> =
+            sqlx::query_as("SELECT provider_message_id FROM processed_messages")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(left, vec![("new".to_string(),)]);
     }
 }
