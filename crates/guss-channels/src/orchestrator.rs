@@ -1133,10 +1133,54 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         actor: &Actor,
         window: TimeWindow,
     ) -> Result<String, OrchestratorError> {
-        if actor.role.can(Action::ReportLonger) {
-            return self.handle_report(window).await;
-        }
         let since = window.start_in(chrono::Utc::now(), &self.business.timezone);
+        let whole_shop = actor.role.can(Action::ReportLonger);
+        let mut events = if whole_shop {
+            self.store
+                .list_events_since(self.business.id, since)
+                .await?
+        } else {
+            self.my_events(actor, since).await?
+        };
+        let mut low_stock = self.store.low_stock_items(self.business.id).await?;
+        let mut from_friday_stock = false;
+        let mut note = String::new();
+        // Linked to Friday: the tills' sales and Friday's stock count too (plan 20.2 #5).
+        if let Some(friday) = self.step_up.as_ref()
+            && let Ok(Some(token)) = friday.token_for_actor(&actor.id).await
+        {
+            match crate::friday_report::till_sales(friday, &token, self.business.id, since).await {
+                Ok(till) => events.extend(till),
+                Err(e) => {
+                    tracing::warn!(error = %e, "till sales not read for the report");
+                    note = texts::till_sales_missing(&self.business.language);
+                }
+            }
+            if let Ok(stock) = crate::friday_report::low_stock(friday, &token).await {
+                low_stock = stock;
+                from_friday_stock = true;
+            }
+        }
+        let mut report =
+            compute_report(&events, low_stock, window, &self.business.default_currency);
+        if from_friday_stock {
+            // Guss's own stock count is stale once Friday keeps stock.
+            report.declining_no_threshold.clear();
+        }
+        let title = if whole_shop {
+            self.business.name.clone()
+        } else {
+            format!("{} · {}", self.business.name, actor.name)
+        };
+        Ok(render_report(&report, &title, &self.business.language) + &note)
+    }
+
+    /// What this person (and a team leader's team) recorded since `since`.
+    async fn my_events(
+        &self,
+        actor: &Actor,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<BusinessEvent>, OrchestratorError> {
         // shortcut: the newest 5,000 entries; a person records far fewer in a day.
         let mine: Vec<BusinessEvent> = self
             .store
@@ -1153,13 +1197,7 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
             .map(|e| e.event)
             .filter(|ev| event_time(ev) >= since)
             .collect();
-        let low_stock = self.store.low_stock_items(self.business.id).await?;
-        let report = compute_report(&mine, low_stock, window, &self.business.default_currency);
-        Ok(render_report(
-            &report,
-            &format!("{} · {}", self.business.name, actor.name),
-            &self.business.language,
-        ))
+        Ok(mine)
     }
 
     pub async fn handle_report(&self, window: TimeWindow) -> Result<String, OrchestratorError> {
@@ -1801,6 +1839,67 @@ mod tests {
                 .pop_front()
                 .expect("a reply for every message"))
         }
+    }
+
+    #[tokio::test]
+    async fn with_friday_linked_the_report_counts_the_tills_and_friday_stock() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/guss/svc/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token": "t", "expires_in": 900})),
+            )
+            .mount(&server)
+            .await;
+        let today = Utc::now().date_naive().to_string();
+        Mock::given(method("GET"))
+            .and(path("/api/invoicing/pos/sales"))
+            .and(query_param("day", today.as_str()))
+            .and(query_param("channel", "till"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"status": "paid", "issued_at": Utc::now().to_rfc3339(), "currency": "KES",
+                 "total_cents": 500000, "lines": [{"description": "Yoghurt", "quantity": 5.0, "total_cents": 500000}]}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/inventory/products"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"name": "Yoghurt", "on_hand_qty": 2, "reorder_point": 5, "track_inventory": true},
+                {"name": "Rice", "on_hand_qty": 0, "reorder_point": 0, "track_inventory": false}
+            ])))
+            .mount(&server)
+            .await;
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let business = BusinessProfile {
+            id: Uuid::new_v4(),
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+        };
+        let o = Orchestrator::new(
+            Nlu::new(
+                QueueProvider(std::sync::Mutex::new(Default::default())),
+                "en",
+            ),
+            store,
+            business,
+        )
+        .with_step_up(Arc::new(crate::friday::FridayClient::new(
+            server.uri(),
+            "fgs_key",
+        )));
+        let boss = Actor::new("telegram:5", "Boss", guss_core::people::Role::Owner);
+        let report = o.handle_report_for(&boss, TimeWindow::Day).await.unwrap();
+        assert!(report.contains("Revenue was 5000.00 KES"), "{report}");
+        assert!(
+            report.contains("Yoghurt (2.0 left, reorder at 5.0)"),
+            "{report}"
+        );
+        assert!(!report.contains("Rice"), "{report}");
     }
 
     #[tokio::test]

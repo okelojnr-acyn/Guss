@@ -545,3 +545,19 @@ pub fn receipt_waiting(language: &str) -> &'static str {
         "Risiti imepokelewa. Sasa niambie matumizi, mf. \"mafuta 2500, nimelipa mimi\".",
     )
 }
+
+/// Added to a report when Friday's till sales couldn't be read.
+pub fn till_sales_missing(language: &str) -> String {
+    match lang(language) {
+        Lang::Id => {
+            "\n(Penjualan kasir di Friday belum bisa dibaca; angka ini hanya dari Guss.)".into()
+        }
+        Lang::Sw => {
+            "\n(Mauzo ya POS kwenye Friday hayakusomeka sasa; hesabu hii ni ya Guss tu.)".into()
+        }
+        Lang::En => {
+            "\n(Friday's till sales couldn't be read just now; these numbers are Guss's only.)"
+                .into()
+        }
+    }
+}

@@ -4,6 +4,7 @@ pub mod step_up;
 pub mod basket;
 pub mod cli;
 pub mod friday;
+pub mod friday_report;
 pub mod friday_sync;
 pub mod items;
 mod journal_texts;
