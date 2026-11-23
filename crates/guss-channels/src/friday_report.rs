@@ -281,11 +281,12 @@ fn split(
 
 /// Friday's stock: tracked products at or under their reorder point.
 pub async fn low_stock(friday: &FridayClient, token: &str) -> Result<Vec<StockLevel>, FridayError> {
-    let rows = friday.get(token, "/api/inventory/products").await?;
-    let products: Vec<Product> = serde_json::from_value(rows).map_err(|e| FridayError::Status {
-        status: 200,
-        body: format!("products: {e}"),
-    })?;
+    let rows = friday.products(token).await?;
+    let products: Vec<Product> =
+        Vec::<Product>::deserialize(rows.as_ref()).map_err(|e| FridayError::Status {
+            status: 200,
+            body: format!("products: {e}"),
+        })?;
     Ok(products
         .into_iter()
         .filter(|p| p.track_inventory && p.reorder_point > 0.0 && p.on_hand_qty <= p.reorder_point)
