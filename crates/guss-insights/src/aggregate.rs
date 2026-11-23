@@ -66,6 +66,9 @@ pub struct ReportData {
     pub declining_no_threshold: Vec<String>,
     pub recurring_revenue: Vec<MrrLine>,
     pub recurring_expenses: Vec<MrrLine>,
+    /// Paid on invoices outside the shop (Friday Invoicing), in the
+    /// business currency; already inside `totals.revenue`.
+    pub invoices_paid: Option<CurrencyAmount>,
 }
 
 /// `timezone` is the shop's (e.g. "Africa/Nairobi"): "today" is its
@@ -316,6 +319,41 @@ pub fn compute_report(
         declining_no_threshold,
         recurring_revenue,
         recurring_expenses,
+        invoices_paid: None,
+    }
+}
+
+/// Adds money received on invoices to the report's revenue and net, per
+/// currency (never converted).
+pub fn add_invoice_payments(report: &mut ReportData, paid: &[CurrencyAmount]) {
+    for p in paid.iter().filter(|p| p.amount.minor_units != 0) {
+        let ccy = norm(&p.currency);
+        let totals = if ccy == report.currency {
+            let seen = report.invoices_paid.get_or_insert_with(|| amount(0, &ccy));
+            seen.amount = seen.amount.checked_add(p.amount);
+            &mut report.totals
+        } else if let Some(t) = report
+            .other_currency_totals
+            .iter_mut()
+            .find(|t| t.currency == ccy)
+        {
+            t
+        } else {
+            let zero = amount(0, &ccy);
+            report.other_currency_totals.push(CurrencyTotals {
+                currency: ccy.clone(),
+                revenue: zero.clone(),
+                expenses: zero.clone(),
+                stock_bought: zero.clone(),
+                net_cash_basis: zero,
+            });
+            report
+                .other_currency_totals
+                .last_mut()
+                .expect("just pushed")
+        };
+        totals.revenue.amount = totals.revenue.amount.checked_add(p.amount);
+        totals.net_cash_basis.amount = totals.net_cash_basis.amount.checked_add(p.amount);
     }
 }
 

@@ -2,9 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use guss_core::domain::BusinessProfile;
-use guss_core::store::{Store, TimeWindow};
-use guss_insights::{build_report, render_report};
+use guss_core::store::TimeWindow;
 use thiserror::Error;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
@@ -40,47 +38,32 @@ impl Default for ScheduleConfig {
     }
 }
 
+/// Builds the report text for a window. The app hands in Guss's
+/// orchestrator, acting as the owner, so scheduled reports match what the
+/// owner gets on asking (including Friday's tills when linked).
+#[async_trait]
+pub trait ReportSource: Send + Sync {
+    async fn report(&self, window: TimeWindow) -> Result<String, String>;
+}
+
 /// Starts the periodic report scheduler. Returns the running
 /// `JobScheduler` - keep it alive (e.g. hold it in a variable for the
 /// life of the process) or the jobs stop firing when it's dropped.
-pub async fn start<S: Store + Send + Sync + 'static>(
-    store: Arc<S>,
-    business: BusinessProfile,
+pub async fn start(
+    source: Arc<dyn ReportSource>,
     sink: Arc<dyn ReportSink>,
     schedule: ScheduleConfig,
 ) -> Result<JobScheduler, SchedulerError> {
     let scheduler = JobScheduler::new()
         .await
         .map_err(|e| SchedulerError::Scheduler(e.to_string()))?;
-
-    add_job(
-        &scheduler,
-        &schedule.daily_cron,
-        TimeWindow::Day,
-        store.clone(),
-        business.clone(),
-        sink.clone(),
-    )
-    .await?;
-    add_job(
-        &scheduler,
-        &schedule.weekly_cron,
-        TimeWindow::Week,
-        store.clone(),
-        business.clone(),
-        sink.clone(),
-    )
-    .await?;
-    add_job(
-        &scheduler,
-        &schedule.monthly_cron,
-        TimeWindow::Month,
-        store,
-        business,
-        sink,
-    )
-    .await?;
-
+    for (cron, window) in [
+        (&schedule.daily_cron, TimeWindow::Day),
+        (&schedule.weekly_cron, TimeWindow::Week),
+        (&schedule.monthly_cron, TimeWindow::Month),
+    ] {
+        add_job(&scheduler, cron, window, source.clone(), sink.clone()).await?;
+    }
     scheduler
         .start()
         .await
@@ -88,12 +71,11 @@ pub async fn start<S: Store + Send + Sync + 'static>(
     Ok(scheduler)
 }
 
-async fn add_job<S: Store + Send + Sync + 'static>(
+async fn add_job(
     scheduler: &JobScheduler,
     cron_expr: &str,
     window: TimeWindow,
-    store: Arc<S>,
-    business: BusinessProfile,
+    source: Arc<dyn ReportSource>,
     sink: Arc<dyn ReportSink>,
 ) -> Result<(), SchedulerError> {
     // In-flight guard: if a previous tick for this job is still running
@@ -102,8 +84,7 @@ async fn add_job<S: Store + Send + Sync + 'static>(
     let in_flight = Arc::new(AtomicBool::new(false));
 
     let job = Job::new_async(cron_expr, move |_uuid, _lock| {
-        let store = store.clone();
-        let business = business.clone();
+        let source = source.clone();
         let sink = sink.clone();
         let in_flight = in_flight.clone();
         Box::pin(async move {
@@ -114,7 +95,11 @@ async fn add_job<S: Store + Send + Sync + 'static>(
                 );
                 return;
             }
-            if let Err(e) = run_once(store.as_ref(), &business, &sink, window).await {
+            let sent = match source.report(window).await {
+                Ok(text) => sink.send_report(text).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = sent {
                 tracing::warn!(error = %e, ?window, "scheduled report run failed");
             }
             in_flight.store(false, Ordering::SeqCst);
@@ -129,31 +114,19 @@ async fn add_job<S: Store + Send + Sync + 'static>(
     Ok(())
 }
 
-async fn run_once<S: Store>(
-    store: &S,
-    business: &BusinessProfile,
-    sink: &Arc<dyn ReportSink>,
-    window: TimeWindow,
-) -> Result<(), String> {
-    let report = build_report(
-        store,
-        business.id,
-        window,
-        &business.default_currency,
-        &business.timezone,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let text = render_report(&report, &business.name, &business.language);
-    sink.send_report(text).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use guss_store::SqliteStore;
     use std::sync::Mutex;
-    use uuid::Uuid;
+
+    struct Shop;
+
+    #[async_trait]
+    impl ReportSource for Shop {
+        async fn report(&self, _window: TimeWindow) -> Result<String, String> {
+            Ok("Report for Acme Shop".into())
+        }
+    }
 
     struct RecordingSink {
         received: Mutex<Vec<String>>,
@@ -169,21 +142,12 @@ mod tests {
 
     #[tokio::test]
     async fn job_fires_and_delivers_a_report_on_a_tight_schedule() {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
-        let business = BusinessProfile {
-            id: Uuid::new_v4(),
-            name: "Acme Shop".into(),
-            default_currency: "USD".into(),
-            language: "en".into(),
-            timezone: "UTC".into(),
-        };
         let sink = Arc::new(RecordingSink {
             received: Mutex::new(Vec::new()),
         });
 
         let mut scheduler = start(
-            store,
-            business,
+            Arc::new(Shop),
             sink.clone(),
             ScheduleConfig {
                 daily_cron: "* * * * * *".to_string(), // every second, test-only

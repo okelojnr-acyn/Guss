@@ -41,6 +41,8 @@ struct RenderContext {
     business_name: String,
     window_label: String,
     total_revenue: String,
+    /// The part of revenue paid on invoices (Friday Invoicing), if any.
+    invoices_paid: Option<String>,
     total_expenses: String,
     /// None when nothing was paid for stock, so the line stays short.
     stock_bought: Option<String>,
@@ -102,6 +104,7 @@ pub fn render_report(data: &ReportData, business_name: &str, language: &str) -> 
         business_name: business_name.to_string(),
         window_label: window_label(data.window, lang_key),
         total_revenue: data.totals.revenue.to_string(),
+        invoices_paid: data.invoices_paid.as_ref().map(ToString::to_string),
         total_expenses: data.totals.expenses.to_string(),
         stock_bought: (data.totals.stock_bought.amount.minor_units != 0)
             .then(|| data.totals.stock_bought.to_string()),
@@ -194,6 +197,7 @@ mod tests {
                 monthly_amount: CurrencyAmount::new(433.0, "USD"),
             }],
             recurring_expenses: vec![],
+            invoices_paid: None,
         }
     }
 
