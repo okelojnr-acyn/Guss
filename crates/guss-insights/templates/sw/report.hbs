@@ -1,6 +1,6 @@
 Hii ni ripoti ya {{business_name}}, kwa {{window_label}}.
 
-Mapato yalikuwa {{total_revenue}} na matumizi {{total_expenses}}{{#if stock_bought}}, pamoja na {{stock_bought}} zilizotumika kununua stoki{{/if}}, faida halisi ni {{net_cash_basis}}.
+Mapato yalikuwa {{total_revenue}}{{#if invoices_paid}} (pamoja na {{invoices_paid}} zilizolipwa kwa ankara){{/if}} na matumizi {{total_expenses}}{{#if stock_bought}}, pamoja na {{stock_bought}} zilizotumika kununua stoki{{/if}}, faida halisi ni {{net_cash_basis}}.
 {{#if other_currencies}}Pia zimerekodiwa kwa sarafu nyingine (zimewekwa kando, hazijabadilishwa): {{#each other_currencies}}mapato {{revenue}}, matumizi {{expenses}}, stoki {{stock_bought}}, halisi {{net_cash_basis}}{{#unless @last}}; {{/unless}}{{/each}}.
 {{/if}}
 {{#if gross_margin}}Kwa gharama za stoki ulizorekodi, faida ghafi inakadiriwa kuwa {{gross_margin}}.

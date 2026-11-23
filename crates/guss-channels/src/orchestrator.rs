@@ -6,7 +6,7 @@ use guss_core::domain::{BusinessEvent, BusinessProfile, Sale, SourceChannel};
 use guss_core::money::CurrencyAmount;
 use guss_core::people::{Action, Actor, Role};
 use guss_core::store::{JournalEntry, Store, StoreError, TimeWindow};
-use guss_insights::{build_report, compute_report, render_report};
+use guss_insights::{add_invoice_payments, build_report, compute_report, render_report};
 use guss_llm::LlmProvider;
 use guss_nlu::{Nlu, NluError, extract_keywords};
 
@@ -890,10 +890,15 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     return self.handle_report_for(actor, window).await;
                 };
                 let since = window.start_in(Utc::now(), &self.business.timezone);
-                let events = self
-                    .store
-                    .list_events_since(self.business.id, since)
-                    .await?;
+                let mut events = self.counted_events(actor, since).await?;
+                if let Some((friday, token)) = self.friday_as(actor).await {
+                    match crate::friday_report::till_sales(friday, &token, self.business.id, since)
+                        .await
+                    {
+                        Ok(till) => events.extend(till),
+                        Err(e) => tracing::warn!(error = %e, "till sales not read for a total"),
+                    }
+                }
                 Ok(texts::totals_about(
                     about,
                     window,
@@ -1133,46 +1138,70 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
         actor: &Actor,
         window: TimeWindow,
     ) -> Result<String, OrchestratorError> {
+        if window != TimeWindow::Day && !actor.role.can(Action::ReportLonger) {
+            return Ok(texts::longer_reports_not_allowed(&self.business.language).into());
+        }
         let since = window.start_in(chrono::Utc::now(), &self.business.timezone);
-        let whole_shop = actor.role.can(Action::ReportLonger);
-        let mut events = if whole_shop {
-            self.store
-                .list_events_since(self.business.id, since)
-                .await?
-        } else {
-            self.my_events(actor, since).await?
-        };
-        let mut low_stock = self.store.low_stock_items(self.business.id).await?;
-        let mut from_friday_stock = false;
+        let mut events = self.counted_events(actor, since).await?;
+        let mut low_stock = None;
+        let mut invoices_paid = Vec::new();
         let mut note = String::new();
-        // Linked to Friday: the tills' sales and Friday's stock count too (plan 20.2 #5).
-        if let Some(friday) = self.step_up.as_ref()
-            && let Ok(Some(token)) = friday.token_for_actor(&actor.id).await
-        {
-            match crate::friday_report::till_sales(friday, &token, self.business.id, since).await {
+        // Linked to Friday: the tills, invoices paid and Friday's stock count too (plan 20.2 #5).
+        if let Some((friday, token)) = self.friday_as(actor).await {
+            let from = crate::friday_report::read(friday, &token, self.business.id, since).await;
+            match from.till {
                 Ok(till) => events.extend(till),
                 Err(e) => {
                     tracing::warn!(error = %e, "till sales not read for the report");
                     note = texts::till_sales_missing(&self.business.language);
                 }
             }
-            if let Ok(stock) = crate::friday_report::low_stock(friday, &token).await {
-                low_stock = stock;
-                from_friday_stock = true;
-            }
+            invoices_paid = from.invoices_paid;
+            low_stock = from.low_stock;
         }
+        let from_friday_stock = low_stock.is_some();
+        let low_stock = match low_stock {
+            Some(stock) => stock,
+            None => self.store.low_stock_items(self.business.id).await?,
+        };
         let mut report =
             compute_report(&events, low_stock, window, &self.business.default_currency);
+        add_invoice_payments(&mut report, &invoices_paid);
         if from_friday_stock {
             // Guss's own stock count is stale once Friday keeps stock.
             report.declining_no_threshold.clear();
         }
-        let title = if whole_shop {
+        let title = if actor.role.can(Action::ReportLonger) {
             self.business.name.clone()
         } else {
             format!("{} · {}", self.business.name, actor.name)
         };
         Ok(render_report(&report, &title, &self.business.language) + &note)
+    }
+
+    /// Friday and a token to act there as this person, when Guss is
+    /// linked and so are they.
+    async fn friday_as(&self, actor: &Actor) -> Option<(&crate::friday::FridayClient, String)> {
+        let friday = self.step_up.as_deref()?;
+        let token = friday.token_for_actor(&actor.id).await.ok()??;
+        Some((friday, token))
+    }
+
+    /// Guss's entries a report for this person counts: the whole shop for
+    /// owners and managers, their own (and their team's) for anyone else.
+    async fn counted_events(
+        &self,
+        actor: &Actor,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<BusinessEvent>, OrchestratorError> {
+        if actor.role.can(Action::ReportLonger) {
+            Ok(self
+                .store
+                .list_events_since(self.business.id, since)
+                .await?)
+        } else {
+            self.my_events(actor, since).await
+        }
     }
 
     /// What this person (and a team leader's team) recorded since `since`.
@@ -1808,6 +1837,28 @@ fn nothing_to_undo_reply(language: &str) -> String {
     }
 }
 
+/// Scheduled reports, as the owner would get them on asking.
+pub struct OwnerReports<P: LlmProvider, S: Store> {
+    pub orchestrator: Arc<Orchestrator<P, S>>,
+    /// "telegram:<chat id>" for a Telegram owner (so Friday's numbers
+    /// count once they've linked), or any id for the rest.
+    pub owner: Actor,
+}
+
+#[async_trait::async_trait]
+impl<P, S> guss_scheduler::ReportSource for OwnerReports<P, S>
+where
+    P: LlmProvider + Send + Sync + 'static,
+    S: Store + Send + Sync + 'static,
+{
+    async fn report(&self, window: TimeWindow) -> Result<String, String> {
+        self.orchestrator
+            .handle_report_for(&self.owner, window)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1839,6 +1890,80 @@ mod tests {
                 .pop_front()
                 .expect("a reply for every message"))
         }
+    }
+
+    #[tokio::test]
+    async fn a_month_from_friday_is_one_request_and_counts_invoices_paid() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/guss/svc/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token": "t", "expires_in": 900})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/invoicing/pos/sales-summary"))
+            .and(query_param("channel", "till"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"currency": "KES", "total_cents": 300000,
+                 "lines": [{"description": "Yoghurt", "quantity": 3.0, "total_cents": 300000}]}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/invoicing/reports/payments-received"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"currency": "KES", "total_cents": 50000}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/inventory/products"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/invoicing/pos/sales"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let business = BusinessProfile {
+            id: Uuid::new_v4(),
+            name: "Duka".into(),
+            default_currency: "KES".into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+        };
+        let o = Orchestrator::new(
+            Nlu::new(
+                QueueProvider(std::sync::Mutex::new(Default::default())),
+                "en",
+            ),
+            store,
+            business,
+        )
+        .with_step_up(Arc::new(crate::friday::FridayClient::new(
+            server.uri(),
+            "fgs_key",
+        )));
+        let boss = Actor::new("telegram:5", "Boss", guss_core::people::Role::Owner);
+        let report = o.handle_report_for(&boss, TimeWindow::Month).await.unwrap();
+        assert!(
+            report.contains("Revenue was 3500.00 KES (including 500.00 KES paid on invoices)"),
+            "{report}"
+        );
+        let staff = Actor::new("telegram:6", "Joe", guss_core::people::Role::Staff);
+        let refused = o
+            .handle_report_for(&staff, TimeWindow::Month)
+            .await
+            .unwrap();
+        assert!(!refused.contains("Revenue"), "{refused}");
     }
 
     #[tokio::test]

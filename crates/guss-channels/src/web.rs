@@ -285,6 +285,11 @@ where
 #[derive(Deserialize)]
 struct ReportQuery {
     window: Option<String>,
+    /// Who asked, from Friday (`friday:<id>`, name, role), so staff see
+    /// their own report; missing = the whole shop (an older Friday).
+    actor_id: Option<String>,
+    actor_name: Option<String>,
+    actor_role: Option<String>,
 }
 
 async fn report<P, S>(
@@ -305,7 +310,26 @@ where
         "month" => TimeWindow::Month,
         _ => return error(StatusCode::BAD_REQUEST, "window must be day, week or month"),
     };
-    match state.orchestrator.handle_report(window).await {
+    let actor = match (q.actor_id, q.actor_role) {
+        (Some(id), Some(role)) => {
+            let asked = ActorIn {
+                id,
+                name: q.actor_name.unwrap_or_default(),
+                role,
+            };
+            match asked.into_actor() {
+                Some(actor) => actor,
+                None => {
+                    return error(
+                        StatusCode::BAD_REQUEST,
+                        "actor: friday:<id>, a name, and role owner, manager or staff",
+                    );
+                }
+            }
+        }
+        _ => Actor::owner("web"),
+    };
+    match state.orchestrator.handle_report_for(&actor, window).await {
         Ok(reply) => Json(Reply { reply }).into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "web report failed");

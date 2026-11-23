@@ -1,6 +1,6 @@
 Ini laporan untuk {{business_name}}, mencakup {{window_label}}.
 
-Pendapatan sebesar {{total_revenue}} dan pengeluaran sebesar {{total_expenses}}{{#if stock_bought}}, ditambah {{stock_bought}} untuk stok{{/if}}, dengan laba bersih {{net_cash_basis}}.
+Pendapatan sebesar {{total_revenue}}{{#if invoices_paid}} (termasuk {{invoices_paid}} dari faktur yang dibayar){{/if}} dan pengeluaran sebesar {{total_expenses}}{{#if stock_bought}}, ditambah {{stock_bought}} untuk stok{{/if}}, dengan laba bersih {{net_cash_basis}}.
 {{#if other_currencies}}Juga tercatat dalam mata uang lain (dihitung terpisah, tidak dikonversi): {{#each other_currencies}}pendapatan {{revenue}}, pengeluaran {{expenses}}, stok {{stock_bought}}, bersih {{net_cash_basis}}{{#unless @last}}; {{/unless}}{{/each}}.
 {{/if}}
 {{#if gross_margin}}Berdasarkan biaya restock yang tercatat, estimasi margin kotor adalah {{gross_margin}}.

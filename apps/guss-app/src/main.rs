@@ -220,7 +220,6 @@ async fn main() {
     );
     let nlu = Nlu::new(provider, business.language.clone());
     let voice = Arc::new(build_voice_support(&config, &business.language));
-    let scheduler_store = store.clone();
     let friday = match (
         config
             .friday
@@ -255,7 +254,6 @@ async fn main() {
         }
         (None, None) => None,
     };
-    let scheduler_business = business.clone();
     let other_currency_policy = config
         .business
         .other_currencies
@@ -309,9 +307,12 @@ async fn main() {
 
             let _job_scheduler = if let Some(chat_id) = config.channel.telegram_owner_chat_id {
                 let sink = Arc::new(telegram::TelegramReportSink::new(token, chat_id));
+                let reports = Arc::new(guss_channels::orchestrator::OwnerReports {
+                    orchestrator: orchestrator.clone(),
+                    owner: guss_core::people::Actor::owner(format!("telegram:{chat_id}")),
+                });
                 match guss_scheduler::start(
-                    scheduler_store,
-                    scheduler_business,
+                    reports,
                     sink,
                     build_schedule_config(&config.channel.scheduler),
                 )
@@ -393,9 +394,12 @@ async fn main() {
                     phone_number_id.clone(),
                     owner_number.clone(),
                 ));
+                let reports = Arc::new(guss_channels::orchestrator::OwnerReports {
+                    orchestrator: orchestrator.clone(),
+                    owner: guss_core::people::Actor::owner("whatsapp:owner"),
+                });
                 match guss_scheduler::start(
-                    scheduler_store,
-                    scheduler_business,
+                    reports,
                     sink,
                     build_schedule_config(&config.channel.scheduler),
                 )
