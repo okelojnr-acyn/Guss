@@ -1163,7 +1163,12 @@ async fn role_of(
         // Not in the cached list: they may have just entered their code
         // in Friday, so ask again rather than say "link first" for a minute.
         Ok(_) => {
-            friday.refresh().await;
+            if !friday
+                .refresh_unless_recent(std::time::Duration::from_secs(10))
+                .await
+            {
+                return None;
+            }
             friday
                 .people()
                 .await
