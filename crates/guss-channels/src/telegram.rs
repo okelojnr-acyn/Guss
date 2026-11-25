@@ -37,6 +37,32 @@ impl TelegramReportSink {
     }
 }
 
+/// Sends Friday's notices (web API /api/notify) to people in their own
+/// chat with the bot; a Telegram user's private chat id is their user id.
+pub struct TelegramNotifier {
+    bot: Bot,
+}
+
+impl TelegramNotifier {
+    pub fn new(bot_token: &str) -> Self {
+        Self {
+            bot: new_bot(bot_token),
+        }
+    }
+}
+
+#[async_trait]
+impl crate::web::Notifier for TelegramNotifier {
+    async fn send_to(&self, telegram_id: i64, text: String, silent: bool) -> Result<(), String> {
+        self.bot
+            .send_message(ChatId(telegram_id), text)
+            .disable_notification(silent)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[async_trait]
 impl ReportSink for TelegramReportSink {
     async fn send_report(&self, text: String) -> Result<(), String> {
