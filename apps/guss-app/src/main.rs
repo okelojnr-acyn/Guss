@@ -271,9 +271,17 @@ async fn main() {
 
     match config.web.token.as_deref().map(str::trim) {
         Some(token) if token.len() >= 24 => {
+            let notifier: Option<Arc<dyn web::Notifier>> = match (
+                config.channel.kind.as_str(),
+                config.channel.telegram_bot_token.as_deref(),
+            ) {
+                ("telegram", Some(bot)) => Some(Arc::new(telegram::TelegramNotifier::new(bot))),
+                _ => None,
+            };
             let web_config = web::WebConfig {
                 token: token.to_string(),
                 listen_addr: config.web.listen_addr.clone(),
+                notifier,
             };
             let web_orchestrator = orchestrator.clone();
             tokio::spawn(async move {

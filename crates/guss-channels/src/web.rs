@@ -10,6 +10,9 @@
 //!   GET  /api/report?window=day|week|month -> {reply}
 //!   GET  /api/voids          - void requests waiting for a decision
 //!   POST /api/voids/decide   - {number, approve, actor} -> {reply}
+//!   POST /api/notify         - {telegram_id, text}: Friday tells one
+//!                              linked person something (a claim waiting
+//!                              for them, a decision on theirs) -> 204
 //!
 //! `actor` ({id, name, role}: owner | manager | staff) says which Friday
 //! person is asking; Friday's kernel sets it from the signed-in user, so
@@ -40,12 +43,22 @@ pub struct WebConfig {
     /// Shared secret; requests must send `Authorization: Bearer <token>`.
     pub token: String,
     pub listen_addr: String,
+    /// Sends Friday's notices; None when Guss has no Telegram bot.
+    pub notifier: Option<Arc<dyn Notifier>>,
+}
+
+/// Delivers one message to one person on the channel (Telegram today).
+#[async_trait::async_trait]
+pub trait Notifier: Send + Sync {
+    /// `silent`: arrives without a sound (Friday's quiet hours).
+    async fn send_to(&self, telegram_id: i64, text: String, silent: bool) -> Result<(), String>;
 }
 
 struct AppState<P: LlmProvider, S: Store> {
     orchestrator: Arc<Orchestrator<P, S>>,
     token: String,
     semaphore: Arc<Semaphore>,
+    notifier: Option<Arc<dyn Notifier>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -54,7 +67,11 @@ pub enum WebError {
     Io(#[from] std::io::Error),
 }
 
-pub fn router<P, S>(orchestrator: Arc<Orchestrator<P, S>>, token: String) -> Router
+pub fn router<P, S>(
+    orchestrator: Arc<Orchestrator<P, S>>,
+    token: String,
+    notifier: Option<Arc<dyn Notifier>>,
+) -> Router
 where
     P: LlmProvider + Send + Sync + 'static,
     S: Store + Send + Sync + 'static,
@@ -63,6 +80,7 @@ where
         orchestrator,
         token,
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT)),
+        notifier,
     });
     Router::new()
         .route("/health", get(health::<P, S>))
@@ -70,6 +88,7 @@ where
         .route("/api/report", get(report::<P, S>))
         .route("/api/voids", get(voids::<P, S>))
         .route("/api/voids/decide", post(decide::<P, S>))
+        .route("/api/notify", post(notify::<P, S>))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
 }
@@ -82,7 +101,7 @@ where
     P: LlmProvider + Send + Sync + 'static,
     S: Store + Send + Sync + 'static,
 {
-    let app = router(orchestrator, config.token);
+    let app = router(orchestrator, config.token, config.notifier);
     tracing::info!(listen_addr = %config.listen_addr, "web API starting");
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     axum::serve(listener, app).await?;
@@ -191,6 +210,53 @@ where
             StatusCode::BAD_GATEWAY,
             &e.user_message(&state.orchestrator.business().language),
         ),
+    }
+}
+
+#[derive(Deserialize)]
+struct NotifyReq {
+    telegram_id: i64,
+    text: String,
+    #[serde(default)]
+    silent: bool,
+}
+
+/// Friday's notices to one linked person. Friday picks who (its own
+/// Telegram links) and writes the text; Guss only delivers it.
+async fn notify<P, S>(
+    State(state): State<Arc<AppState<P, S>>>,
+    headers: HeaderMap,
+    Json(req): Json<NotifyReq>,
+) -> Response
+where
+    P: LlmProvider + Send + Sync + 'static,
+    S: Store + Send + Sync + 'static,
+{
+    if !token_ok(&state.token, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong token");
+    }
+    let text = req.text.trim();
+    if text.is_empty() || text.chars().count() > MAX_TEXT || req.telegram_id <= 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "a telegram_id and a text of up to 2000 characters",
+        );
+    }
+    let Some(notifier) = &state.notifier else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Guss has no Telegram bot to send with",
+        );
+    };
+    match notifier
+        .send_to(req.telegram_id, text.to_string(), req.silent)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't deliver a Friday notice");
+            error(StatusCode::BAD_GATEWAY, "Telegram didn't take the message")
+        }
     }
 }
 
