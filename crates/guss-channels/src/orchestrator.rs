@@ -1671,10 +1671,10 @@ fn set_who_paid(events: &mut [BusinessEvent], mine: bool) {
 /// Marks every own-money expense as spent on the person's trip.
 fn set_on_trip(events: &mut [BusinessEvent]) {
     for e in events {
-        if let BusinessEvent::Expense(x) = e {
-            if x.reimburse == Some(true) {
-                x.spent_on = Some("trip".into());
-            }
+        if let BusinessEvent::Expense(x) = e
+            && x.reimburse == Some(true)
+        {
+            x.spent_on = Some("trip".into());
         }
     }
 }

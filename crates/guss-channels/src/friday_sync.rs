@@ -671,14 +671,13 @@ async fn push_claim(
                 "reimburse": true,
                 "category": friday_category(x.category.as_deref().unwrap_or(&x.description)),
             });
-            if x.spent_on.as_deref() == Some("trip") {
-                if let Some((id, label)) =
+            if x.spent_on.as_deref() == Some("trip")
+                && let Some((id, label)) =
                     approved_trip(friday, token, x.occurred_at.date_naive()).await
-                {
-                    body["for_kind"] = json!("trip");
-                    body["for_id"] = json!(id);
-                    body["for_label"] = json!(label);
-                }
+            {
+                body["for_kind"] = json!("trip");
+                body["for_id"] = json!(id);
+                body["for_label"] = json!(label);
             }
             friday
                 .post(token, "/api/minions/expense_claims", &body)
