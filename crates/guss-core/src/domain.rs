@@ -117,6 +117,10 @@ pub struct Expense {
     /// said (the business, for the owner; Guss asks anyone else).
     #[serde(default)]
     pub reimburse: Option<bool>,
+    /// What it was for, as Friday's claims say it: None is daily running;
+    /// "trip" is the person's approved trip (Friday finds which).
+    #[serde(default)]
+    pub spent_on: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

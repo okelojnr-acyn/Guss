@@ -356,6 +356,7 @@ fn to_business_event(
                 source_channel,
                 raw_text: Some(raw_text.to_string()),
                 reimburse,
+                spent_on: None,
             })
         }
         ExtractedEvent::StockUpdate {

@@ -351,6 +351,9 @@ impl<P: LlmProvider, S: Store> Orchestrator<P, S> {
                     if let Some(mine) = texts::who_paid_answer(&trimmed) {
                         let mut events = h.events;
                         set_who_paid(&mut events, mine);
+                        if texts::who_paid_on_trip(&trimmed) {
+                            set_on_trip(&mut events);
+                        }
                         return self.prepare(actor, conversation_key, events, &home).await;
                     }
                     dropped_note = Some(texts::who_paid_dropped(language));
@@ -1424,6 +1427,9 @@ fn describe_event(event: &BusinessEvent, language: &str) -> String {
                 _ => format!("Expense: {} for {}", e.description, e.amount),
             };
             let paid_back = match (e.reimburse, language) {
+                (Some(true), "id") if e.spent_on.is_some() => " (uang pribadi, perjalanan dinas)",
+                (Some(true), "sw") if e.spent_on.is_some() => " (pesa yako, ya safari)",
+                (Some(true), _) if e.spent_on.is_some() => " (your own money, on your trip)",
                 (Some(true), "id") => " (uang pribadi, akan diganti)",
                 (Some(true), "sw") => " (pesa yako, utarudishiwa)",
                 (Some(true), _) => " (your own money, to be paid back)",
@@ -1658,6 +1664,17 @@ fn set_who_paid(events: &mut [BusinessEvent], mine: bool) {
     for e in events {
         if let BusinessEvent::Expense(x) = e {
             x.reimburse.get_or_insert(mine);
+        }
+    }
+}
+
+/// Marks every own-money expense as spent on the person's trip.
+fn set_on_trip(events: &mut [BusinessEvent]) {
+    for e in events {
+        if let BusinessEvent::Expense(x) = e
+            && x.reimburse == Some(true)
+        {
+            x.spent_on = Some("trip".into());
         }
     }
 }
@@ -2860,6 +2877,26 @@ mod tests {
         // "1": the business paid.
         assert!(ask("fuel 2500").await.unwrap().starts_with("Who paid"));
         assert!(ask("1").await.unwrap().starts_with("Expense: fuel"));
+        // "3": own money on an approved trip; Friday puts it against the trip.
+        assert!(ask("fuel 2500").await.unwrap().starts_with("Who paid"));
+        assert!(
+            ask("3")
+                .await
+                .unwrap()
+                .contains("(your own money, on your trip)")
+        );
+        let on: Vec<_> = o
+            .store
+            .list_events(o.business.id, TimeWindow::Day)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e {
+                BusinessEvent::Expense(x) => x.spent_on,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(on, vec!["trip".to_string()]);
         // The owner isn't asked: unsaid means the business.
         let boss = person("boss", Role::Owner);
         let reply = o
@@ -2875,7 +2912,8 @@ mod tests {
             .unwrap();
         let mut got = who_paid_flags(&o).await;
         got.sort();
-        assert_eq!(got, vec![Some(false), Some(false), Some(true)]);
+        // 2 (pay back), 1 (business), 3 (own money on a trip), the owner's.
+        assert_eq!(got, vec![Some(false), Some(false), Some(true), Some(true)]);
     }
 
     async fn who_paid_flags(o: &Orchestrator<FixedProvider, SqliteStore>) -> Vec<Option<bool>> {
@@ -2898,6 +2936,8 @@ mod tests {
         assert_eq!(texts::who_paid_answer("2."), Some(true));
         assert_eq!(texts::who_paid_answer("mimi"), Some(true));
         assert_eq!(texts::who_paid_answer("sold 3 rice"), None);
+        assert_eq!(texts::who_paid_answer("3"), Some(true));
+        assert!(texts::who_paid_on_trip("Safari") && !texts::who_paid_on_trip("2"));
     }
 
     #[tokio::test]

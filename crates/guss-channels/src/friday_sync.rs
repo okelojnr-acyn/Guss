@@ -530,6 +530,118 @@ async fn withdraw_claim(
     }
 }
 
+/// Friday's kind of cost for Guss's category (or the description when
+/// there's none); anything else is "other".
+fn friday_category(said: &str) -> &'static str {
+    const WORDS: &[(&str, &[&str])] = &[
+        (
+            "fuel",
+            &["fuel", "petrol", "diesel", "mafuta", "bensin", "solar"],
+        ),
+        (
+            "transport",
+            &[
+                "transport",
+                "taxi",
+                "boda",
+                "matatu",
+                "bus",
+                "fare",
+                "nauli",
+                "ojek",
+                "angkot",
+            ],
+        ),
+        (
+            "meals",
+            &[
+                "meal",
+                "lunch",
+                "food",
+                "breakfast",
+                "dinner",
+                "chakula",
+                "makan",
+            ],
+        ),
+        (
+            "accommodation",
+            &["hotel", "lodging", "accommodation", "malazi", "penginapan"],
+        ),
+        ("airtime", &["airtime", "data", "bundle", "pulsa", "vocha"]),
+        (
+            "repairs",
+            &[
+                "repair",
+                "fix",
+                "mechanic",
+                "matengenezo",
+                "servis",
+                "perbaikan",
+            ],
+        ),
+        (
+            "cleaning",
+            &["clean", "soap", "usafi", "sabuni", "kebersihan"],
+        ),
+        (
+            "supplies",
+            &[
+                "supplies",
+                "stationery",
+                "packaging",
+                "bags",
+                "vifaa",
+                "perlengkapan",
+            ],
+        ),
+    ];
+    let said = said.to_lowercase();
+    WORDS
+        .iter()
+        .find(|(_, words)| words.iter().any(|w| said.contains(w)))
+        .map_or("other", |(kind, _)| kind)
+}
+
+/// The person's approved trip (Friday's spend requests) that covers `day`,
+/// else their latest approved one; None when they have none (the claim
+/// then goes as daily running and Friday flags it if it needed asking).
+async fn approved_trip(
+    friday: &FridayClient,
+    token: &str,
+    day: chrono::NaiveDate,
+) -> Option<(String, String)> {
+    let open = friday
+        .get(token, "/api/minions/spend_requests?mine=true&open=true")
+        .await
+        .ok()?;
+    let trips: Vec<&Value> = open
+        .as_array()?
+        .iter()
+        .filter(|r| r.get("kind").and_then(Value::as_str) == Some("trip"))
+        .collect();
+    let covers = |r: &&Value| {
+        let date = |k: &str| {
+            r.get(k)
+                .and_then(Value::as_str)
+                .and_then(|d| d.parse::<chrono::NaiveDate>().ok())
+        };
+        matches!((date("starts_on"), date("ends_on")), (Some(a), Some(b)) if a <= day && day <= b)
+    };
+    let trip = trips
+        .iter()
+        .copied()
+        .find(covers)
+        .or(trips.first().copied())?;
+    let id = trip.get("id")?.as_str()?.to_string();
+    let label = trip
+        .get("destination")
+        .and_then(Value::as_str)
+        .unwrap_or("trip")
+        .to_string();
+    Some((id, label))
+}
+
 async fn push_claim(
     friday: &FridayClient,
     token: &str,
@@ -552,17 +664,23 @@ async fn push_claim(
     let claim = match existing {
         Some(c) => c.clone(),
         None => {
+            let mut body = json!({
+                "description": format!("{} {tag}", x.description),
+                "amount_cents": (x.amount.major_units() * 100.0).round() as i64,
+                "currency": x.amount.currency,
+                "reimburse": true,
+                "category": friday_category(x.category.as_deref().unwrap_or(&x.description)),
+            });
+            if x.spent_on.as_deref() == Some("trip")
+                && let Some((id, label)) =
+                    approved_trip(friday, token, x.occurred_at.date_naive()).await
+            {
+                body["for_kind"] = json!("trip");
+                body["for_id"] = json!(id);
+                body["for_label"] = json!(label);
+            }
             friday
-                .post(
-                    token,
-                    "/api/minions/expense_claims",
-                    &json!({
-                        "description": format!("{} {tag}", x.description),
-                        "amount_cents": (x.amount.major_units() * 100.0).round() as i64,
-                        "currency": x.amount.currency,
-                        "reimburse": true,
-                    }),
-                )
+                .post(token, "/api/minions/expense_claims", &body)
                 .await?
         }
     };
@@ -1356,6 +1474,14 @@ mod tests {
         assert!(queue[0].entry.sync_error.is_some());
     }
 
+    #[test]
+    fn categories_map_to_fridays_kinds_of_cost() {
+        assert_eq!(friday_category("Petrol for the van"), "fuel");
+        assert_eq!(friday_category("boda to the supplier"), "transport");
+        assert_eq!(friday_category("pulsa"), "airtime");
+        assert_eq!(friday_category("rent"), "other");
+    }
+
     #[tokio::test]
     async fn money_staff_paid_is_owed_to_them_and_claimed_in_minions() {
         let server = friday_with(json!({"accounting": "write", "minions": "write"})).await;
@@ -1374,6 +1500,8 @@ mod tests {
             source_channel: SourceChannel::Telegram,
             raw_text: None,
             reimburse: Some(true),
+            // On her approved trip (Telegram's "3").
+            spent_on: Some("trip".into()),
         });
         store.save_event_by(&fuel, Some(&mary)).await.unwrap();
         // Mary sent the receipt photo with it.
@@ -1422,11 +1550,23 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .mount(&server)
             .await;
+        let today = Utc::now().date_naive();
+        Mock::given(method("GET"))
+            .and(path("/api/minions/spend_requests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": "t-old", "kind": "trip", "destination": "Mombasa", "starts_on": "2020-01-01", "ends_on": "2020-01-02"},
+                {"id": "s-1", "kind": "spend", "description": "paint"},
+                {"id": "t-1", "kind": "trip", "destination": "Nakuru",
+                 "starts_on": today.to_string(), "ends_on": today.to_string()}
+            ])))
+            .mount(&server)
+            .await;
         Mock::given(method("POST"))
             .and(path("/api/minions/expense_claims"))
             .and(body_partial_json(json!({
                 "description": format!("fuel (Guss {})", &id.to_string()[..8]),
-                "amount_cents": 250000, "currency": "KES", "reimburse": true
+                "amount_cents": 250000, "currency": "KES", "reimburse": true,
+                "category": "fuel", "for_kind": "trip", "for_id": "t-1", "for_label": "Nakuru"
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "c-1"})))
             .expect(1)
@@ -1467,6 +1607,7 @@ mod tests {
             source_channel: SourceChannel::Telegram,
             raw_text: None,
             reimburse: Some(true),
+            spent_on: None,
         });
         store.save_event_by(&fuel, Some(&mary)).await.unwrap();
         let tag = format!("fuel (Guss {})", &id.to_string()[..8]);
@@ -1526,6 +1667,7 @@ mod tests {
             source_channel: SourceChannel::Telegram,
             raw_text: None,
             reimburse: None,
+            spent_on: None,
         });
         store.save_event_by(&transport, Some(&mary)).await.unwrap();
 
