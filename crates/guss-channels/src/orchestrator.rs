@@ -2912,7 +2912,8 @@ mod tests {
             .unwrap();
         let mut got = who_paid_flags(&o).await;
         got.sort();
-        assert_eq!(got, vec![Some(false), Some(false), Some(true)]);
+        // 2 (pay back), 1 (business), 3 (own money on a trip), the owner's.
+        assert_eq!(got, vec![Some(false), Some(false), Some(true), Some(true)]);
     }
 
     async fn who_paid_flags(o: &Orchestrator<FixedProvider, SqliteStore>) -> Vec<Option<bool>> {
