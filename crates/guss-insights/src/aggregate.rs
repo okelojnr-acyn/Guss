@@ -401,6 +401,7 @@ mod tests {
             source_channel: SourceChannel::Cli,
             raw_text: None,
             reimburse: None,
+            spent_on: None,
         })
     }
 

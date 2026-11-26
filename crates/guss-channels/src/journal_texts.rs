@@ -488,13 +488,13 @@ pub fn return_of_credit_sale(item: &str, customer: &str, language: &str) -> Stri
 pub fn who_paid_question(what: &str, language: &str) -> String {
     match lang(language) {
         Lang::Id => format!(
-            "Siapa yang membayar {what}? Balas 1 untuk usaha (uang toko), atau 2 kalau pakai uang Anda dan minta diganti."
+            "Siapa yang membayar {what}? Balas 1 untuk usaha (uang toko), 2 kalau pakai uang Anda dan minta diganti, atau 3 kalau pakai uang Anda dalam perjalanan dinas yang sudah disetujui."
         ),
         Lang::Sw => format!(
-            "Nani alilipia {what}? Jibu 1 kama ni biashara (pesa ya duka), au 2 kama ulitumia pesa yako na unataka urudishiwe."
+            "Nani alilipia {what}? Jibu 1 kama ni biashara (pesa ya duka), 2 kama ulitumia pesa yako na unataka urudishiwe, au 3 kama ni pesa yako kwenye safari iliyoidhinishwa."
         ),
         Lang::En => format!(
-            "Who paid for {what}? Reply 1 if the business paid (shop money), or 2 if you used your own money and want it back."
+            "Who paid for {what}? Reply 1 if the business paid (shop money), 2 if you used your own money and want it back, or 3 if it was your own money on an approved trip."
         ),
     }
 }
@@ -529,11 +529,18 @@ pub fn who_paid_answer(text: &str) -> Option<bool> {
     let t = text.trim().trim_end_matches('.').to_lowercase();
     if BUSINESS.contains(&t.as_str()) {
         Some(false)
-    } else if ME.contains(&t.as_str()) {
+    } else if ME.contains(&t.as_str()) || who_paid_on_trip(&t) {
         Some(true)
     } else {
         None
     }
+}
+
+/// "3"/"trip": own money, spent on the person's approved trip (it then
+/// goes against that trip in Friday). who_paid_answer reads it as "mine".
+pub fn who_paid_on_trip(text: &str) -> bool {
+    const TRIP: &[&str] = &["3", "trip", "on my trip", "safari", "perjalanan", "dinas"];
+    TRIP.contains(&text.trim().trim_end_matches('.').to_lowercase().as_str())
 }
 
 /// A receipt photo without a caption.
